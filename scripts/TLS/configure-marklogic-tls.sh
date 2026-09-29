@@ -17,7 +17,7 @@
 # - Certificate validation and testing
 #
 # Author: Martin Warnes
-# Version: 1.0.4
+# Version: 1.0.5
 # Date: September 2026
 #
 # Usage:
@@ -87,6 +87,7 @@ MARKLOGIC_HOST="${MARKLOGIC_HOST:-localhost}"
 MARKLOGIC_PORT="${MARKLOGIC_PORT:-8002}"
 MARKLOGIC_USER="${MARKLOGIC_USER:-admin}"
 MARKLOGIC_PASS="${MARKLOGIC_PASS:-}"
+ALLOW_HTTP="${MARKLOGIC_ALLOW_HTTP:-false}"
 FORCE="false"
 DRY_RUN="false"
 
@@ -653,6 +654,10 @@ TEST-SSL OPTIONS:
     --host HOSTNAME               Hostname to test (default: localhost)
     --port PORT                   Port to test (default: 8443)
 
+TRANSPORT OPTION:
+    Remote hostnames default to HTTPS; loopback hosts may use HTTP.
+    MARKLOGIC_ALLOW_HTTP=true    Allow unencrypted remote HTTP for isolated tests only
+
 SHOW-TEMPLATE OPTIONS:
     --name NAME                   Template name (required)
 
@@ -820,14 +825,28 @@ parse_arguments() {
 
 # Main execution function
 main() {
-    ml_show_header "MarkLogic TLS Certificate Management" "1.0.4" \
+    ml_show_header "MarkLogic TLS Certificate Management" "1.0.5" \
         "Configure TLS/SSL certificates for MarkLogic Server"
 
     ml_check_dependencies || exit 1
-    case "$MARKLOGIC_HOST" in http://*|https://*) ;; *) MARKLOGIC_HOST="http://$MARKLOGIC_HOST" ;; esac
+    case "$MARKLOGIC_HOST" in
+        http://*|https://*) ;;
+        localhost|localhost:*|127.0.0.1|127.0.0.1:*) MARKLOGIC_HOST="http://$MARKLOGIC_HOST" ;;
+        *) MARKLOGIC_HOST="https://$MARKLOGIC_HOST" ;;
+    esac
     tls_validate_endpoint_url "$MARKLOGIC_HOST" || exit 1
-    local authority="${MARKLOGIC_HOST#*://}"
-    case "$authority" in */) MARKLOGIC_HOST="${MARKLOGIC_HOST%/}" ;; */*) ml_log_error "MarkLogic host must not include a path"; exit 1 ;; esac
+    local authority="${MARKLOGIC_HOST#*://}" host_for_transport
+    case "$authority" in */) MARKLOGIC_HOST="${MARKLOGIC_HOST%/}"; authority="${MARKLOGIC_HOST#*://}" ;; */*) ml_log_error "MarkLogic host must not include a path"; exit 1 ;; esac
+    if [[ "$MARKLOGIC_HOST" == http://* ]]; then
+        host_for_transport="${authority%%:*}"
+        case "$host_for_transport" in
+            localhost|127.0.0.1) ;;
+            *)
+                [ "$ALLOW_HTTP" = "true" ] || { ml_log_error "Unencrypted remote HTTP is disabled; use HTTPS or set MARKLOGIC_ALLOW_HTTP=true for isolated testing"; exit 1; }
+                ml_log_warning "Unencrypted HTTP enabled: Management API credentials and certificate private keys may be exposed on the network"
+                ;;
+        esac
+    fi
     ml_parse_host_url "$MARKLOGIC_HOST"
     [[ -n "$ML_HOST" && "$ML_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { ml_log_error "Invalid MarkLogic host"; exit 1; }
     [[ "$ML_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$ML_PORT" -ge 1 ] && [ "$ML_PORT" -le 65535 ] || { ml_log_error "Invalid MarkLogic port"; exit 1; }

@@ -227,17 +227,15 @@ tls_build_chain_file() {
         return 1
     fi
 
-    # Combine certificate with intermediate
-    cat "$cert_file" "$intermediate_file" > "$output_file"
-
-    if [ -f "$output_file" ]; then
-        tls_write_output_manifest "${output_file}.rollback.json" "$output_file" || { rm -f "$output_file"; return 1; }
-        ml_log_success "Certificate chain built: $output_file"
-        return 0
-    else
+    # Combine certificate with intermediate; never leave a partial chain on failure.
+    if ! cat "$cert_file" "$intermediate_file" > "$output_file"; then
+        rm -f "$output_file"
         ml_log_error "Failed to build certificate chain"
         return 1
     fi
+    tls_write_output_manifest "${output_file}.rollback.json" "$output_file" || { rm -f "$output_file"; return 1; }
+    ml_log_success "Certificate chain built: $output_file"
+    return 0
 }
 
 # ================================================================
