@@ -1363,7 +1363,7 @@ main() {
         echo
         case "$COMMAND" in
             create-external-security)
-                ml_show_footer "1. Test LDAP connectivity: $0 test-ldap --external-security $EXTERNAL_SECURITY_NAME --test-user <username>"
+                ml_show_footer "1. Test LDAP connectivity: $0 test-ldap --external-security $EXTERNAL_SECURITY_NAME --test-user <username>
 2. Configure app server: $0 configure-appserver --appserver <NAME> --external-security $EXTERNAL_SECURITY_NAME
 3. Search users/groups: $0 search-users --external-security $EXTERNAL_SECURITY_NAME"
                 ;;
