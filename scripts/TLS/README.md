@@ -4,7 +4,7 @@ This directory contains scripts for managing TLS/SSL certificates in MarkLogic e
 
 > **Disclaimer:** This is a personal collection of technical work, not official Progress or MarkLogic documentation. The author is employed by Progress; these materials represent personal views. Users are responsible for testing and validating all examples.
 >
-> **Safety and recovery:** The one-shot `setup-complete-marklogic-environment.sh` and `complete-marklogic-appserver-setup.sh` scripts are retained at their existing implementations for later QA. Their multi-step remote changes do not have a reliable rollback; review each stage and use only a disposable environment until they are tested. MarkLogic credentials use `MARKLOGIC_PASS` or a hidden prompt; password-valued CLI flags are rejected. `configure-marklogic-tls.sh` defaults remote Management API connections to HTTPS; loopback HTTP remains available for local testing. That script's `MARKLOGIC_ALLOW_HTTP=true` setting explicitly permits unencrypted remote HTTP for isolated tests only—credentials and private-key payloads are exposed in transit.
+> **Safety and recovery:** MarkLogic-changing commands (`configure-marklogic-tls.sh`, `example-end-to-end-tls.sh`, the Certbot deploy hook) have no reliable rollback; use `--dry-run` first and a disposable environment until you have tested them. MarkLogic credentials use `MARKLOGIC_PASS` or a hidden prompt; password-valued CLI flags are rejected. `configure-marklogic-tls.sh` defaults remote Management API connections to HTTPS; loopback HTTP remains available for local testing. That script's `MARKLOGIC_ALLOW_HTTP=true` setting explicitly permits unencrypted remote HTTP for isolated tests only—credentials and private-key payloads are exposed in transit.
 >
 > CA, CSR, export, and PKCS12 generation commands create protected `*.rollback.json` manifests. `--rollback FILE` removes only unchanged files recorded in that manifest, after confirmation. MarkLogic mutations save protected snapshots, but MarkLogic may redact key fields; restore manually when a snapshot is incomplete. Certbot issuance/revocation, package installation, service scheduling, and external DNS/IAM changes are not automatically reversible.
 
@@ -313,19 +313,23 @@ Common utility functions for TLS/SSL certificate management including validation
 ### 4. `validate-tls.sh` - TLS Validation
 Validates TLS configurations and certificates.
 
-### 5. `example-create-ca.sh` - Example Script
-Demonstrates how to create a CA for ca1.example.com with CN=CA1.
+### 5. `example-end-to-end-tls.sh` - Worked example (test systems)
+Runs the whole flow against a MarkLogic test system: private CA, MarkLogic-generated CSR, signing, import, HTTPS app server, and a CA- and hostname-verified handshake. Use `--dry-run` to read the steps first.
+
+```bash
+export MARKLOGIC_PASS='<admin password>'
+./example-end-to-end-tls.sh --marklogic-host https://ml.example.com --hostname ml.example.com --create-appserver 8443 --dry-run
+```
+
+### 6. `example-marklogic-client-auth.sh` - Client certificates
+Creates a private CA and two client certificates (`clientAuth`, email SAN) for MarkLogic certificate authentication.
+
+### 7. `renew-certificates.sh` and `monitor-certificate-expiry.sh` - Expiry
+`monitor-certificate-expiry.sh` is a read-only expiry report (text or JSON). `renew-certificates.sh` finds templates expiring within `--threshold` days and asks MarkLogic for a new CSR for each (the installed certificate keeps serving until you sign and `import-cert` the new one).
 
 ## Quick Start - Create a Test CA
 
 For testing purposes, you can quickly create a Certificate Authority:
-
-```bash
-# Run the example script
-./example-create-ca.sh
-```
-
-Or create one manually:
 
 ```bash
 # Create CA with password protection

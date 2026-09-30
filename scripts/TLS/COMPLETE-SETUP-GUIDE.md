@@ -1,13 +1,10 @@
 # MarkLogic TLS setup and recovery
 
-## All-in-one setup scripts
+## End-to-end example
 
-`setup-complete-marklogic-environment.sh` and
-`complete-marklogic-appserver-setup.sh` remain available at their existing
-implementations for future QA. They combine CA/key generation, certificate
-import, AppServer changes, and account setup without a reliable transactional
-rollback. Review each stage and use only a disposable test environment until
-those workflows have been validated.
+`example-end-to-end-tls.sh` runs the complete flow (private CA, MarkLogic-generated
+CSR, signing, import, HTTPS app server, verified handshake) by calling the component
+scripts below. It is meant for test systems; run it with `--dry-run` first.
 
 ## Reviewed component workflow
 
@@ -59,5 +56,5 @@ export TLS_CA_PASSWORD="<from a secret manager>"
 
 For a MarkLogic deployment, set `MARKLOGIC_PASS` or use the hidden prompt, then
 run `configure-marklogic-tls.sh` with the reviewed template and AppServer names.
-The one-shot setup scripts may create remote users/configuration; review their
-source before running and do not assume they have automatic rollback.
+`example-end-to-end-tls.sh` changes the target MarkLogic (template, app server) and has no
+automatic rollback; use it on a test system.
