@@ -123,7 +123,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
   printf '\n'
   printf 'DRY RUN PLAN:\n'
   printf '  Package manager:     %s\n' "$DETECTED_PM"
-  printf '  System packages:     python3 python3-pip python3-virtualenv jq curl cronie\n'
+  printf '  System packages:     python3 python3-pip python3-virtualenv jq cronie, curl (only those missing)\n'
   printf '  Certbot install:     /opt/certbot (Python virtual environment)\n'
   printf '  Certbot symlink:     /usr/local/bin/certbot (if path is available)\n'
   printf '  Deploy hook:         /usr/local/bin/marklogic-cert-deploy.sh\n'
@@ -159,15 +159,25 @@ case "$DETECTED_PM" in
     ;;
 esac
 
-REQUIRED_PACKAGES="$PYTHON_PACKAGES jq curl cronie"
+# Install only what is missing. Amazon Linux 2023 ships curl-minimal, which conflicts with
+# the full "curl" package, so a blanket "install curl" fails there; any curl binary is fine.
+MISSING_PACKAGES=""
+for pkg in $PYTHON_PACKAGES jq cronie; do
+  rpm -q "$pkg" >/dev/null 2>&1 || MISSING_PACKAGES="$MISSING_PACKAGES $pkg"
+done
+command -v curl >/dev/null 2>&1 || MISSING_PACKAGES="$MISSING_PACKAGES curl"
 
-# shellcheck disable=SC2086
-if ! $DETECTED_PM install -y $REQUIRED_PACKAGES; then
-  log_error "Failed to install required packages: $REQUIRED_PACKAGES"
-  log_error "Manual recovery: verify $DETECTED_PM is configured correctly and the system is up to date."
-  log_error "Supported platforms: RHEL/Rocky/AlmaLinux 8+, Amazon Linux 2023+"
-  log_error "Check $DETECTED_PM output above for specific package errors."
-  exit 1
+if [[ -z "${MISSING_PACKAGES// /}" ]]; then
+  log_info "All required system packages are already installed"
+else
+  # shellcheck disable=SC2086
+  if ! $DETECTED_PM install -y $MISSING_PACKAGES; then
+    log_error "Failed to install required packages:$MISSING_PACKAGES"
+    log_error "Manual recovery: verify $DETECTED_PM is configured correctly and the system is up to date."
+    log_error "Supported platforms: RHEL/Rocky/AlmaLinux 8+, Amazon Linux 2023+"
+    log_error "Check $DETECTED_PM output above for specific package errors."
+    exit 1
+  fi
 fi
 
 # ---- create certbot virtual environment ------------------------------------

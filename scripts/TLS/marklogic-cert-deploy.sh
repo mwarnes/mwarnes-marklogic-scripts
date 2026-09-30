@@ -42,8 +42,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/tls-utils.sh"
+# Self-contained on purpose: setup-certbot-route53.sh installs this file alone into
+# /usr/local/bin, so it must not source the other scripts in this repository.
 
 # ---- defaults -------------------------------------------------------------
 ML_HOST="${ML_HOST:-localhost}"
@@ -99,6 +99,14 @@ log()     { echo "[marklogic-cert-deploy] $*"; }
 log_verbose() { [[ "$VERBOSE" == "true" ]] && echo "[marklogic-cert-deploy] [VERBOSE] $*" || true; }
 fail()    { echo "[marklogic-cert-deploy] ERROR: $*" >&2; exit 1; }
 
+# Certificate and key match when their public keys are identical (nothing secret is printed).
+cert_key_match() {
+  local cert_pub key_pub
+  cert_pub=$(openssl x509 -in "$1" -pubkey -noout 2>/dev/null) || return 1
+  key_pub=$(openssl pkey -in "$2" -pubout -passin pass: 2>/dev/null) || return 1
+  [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]]
+}
+
 # ---- static validation ------------------------------------------------------
 [[ -n "$ML_CERT_TEMPLATE" ]] || fail "ML_CERT_TEMPLATE is required."
 [[ "$ML_CERT_TEMPLATE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Invalid certificate-template name."
@@ -126,7 +134,7 @@ case "$ML_USER$ML_PASSWORD" in *$'\n'*|*$'\r'*) fail "Credentials must not conta
 command -v jq >/dev/null 2>&1 || fail "jq is required."
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 command -v openssl >/dev/null 2>&1 || fail "openssl is required."
-tls_verify_cert_key_match "$CERT_FILE" "$KEY_FILE" || fail "Certificate and private key do not match."
+cert_key_match "$CERT_FILE" "$KEY_FILE" || fail "Certificate and private key do not match."
 
 template_path=$(jq -nr --arg name "$ML_CERT_TEMPLATE" '$name|@uri') || fail "Could not encode certificate-template name."
 log_verbose "Deploying to configured certificate template (name omitted)"
