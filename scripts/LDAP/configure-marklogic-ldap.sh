@@ -87,6 +87,9 @@ USER_DN_TEMPLATE=""
 GROUP_DN_TEMPLATE=""
 START_TLS="false"
 CERTIFICATE_FILE=""
+CLIENT_CERT_FILE=""
+CLIENT_KEY_FILE=""
+CA_FILE=""
 APPSERVER_NAME=""
 AUTH_MODE="digest"
 APPSERVER_GROUP="${APPSERVER_GROUP:-Default}"
@@ -250,7 +253,17 @@ ldap_validate_command_inputs() {
     if [ -n "$GROUP_DN_TEMPLATE" ] && ! ldap_validate_dn_input "${GROUP_DN_TEMPLATE//\{group\}/x}"; then ml_log_error "Invalid group DN template"; return 1; fi
     if [ -n "$EXTERNAL_SECURITY_NAME" ] && ! ldap_validate_resource_name "$EXTERNAL_SECURITY_NAME"; then ml_log_error "Invalid external security name"; return 1; fi
     if [ -n "$APPSERVER_NAME" ] && ! ldap_validate_resource_name "$APPSERVER_NAME"; then ml_log_error "Invalid app server name"; return 1; fi
-    case "$LDAP_BIND_METHOD" in simple|SASL|sasl) ;; *) ml_log_error "Bind method must be simple or SASL"; return 1 ;; esac
+    case "$LDAP_BIND_METHOD" in
+        simple|external) ;;
+        MD5|md5) ml_log_error "Bind method MD5 is deprecated and rejected by MarkLogic 12 (SEC-LDAPMD5DEPRECATED); use simple over ldaps:// or --start-tls"; return 1 ;;
+        SASL|sasl) ml_log_error "MarkLogic has no SASL bind method (valid values are simple and external); for a certificate-protected connection use --bind-method simple with --client-cert and --client-key"; return 1 ;;
+        *) ml_log_error "Bind method must be simple or external"; return 1 ;;
+    esac
+    if [ -n "$CLIENT_CERT_FILE$CLIENT_KEY_FILE" ]; then
+        [ -n "$CLIENT_CERT_FILE" ] && [ -n "$CLIENT_KEY_FILE" ] || { ml_log_error "--client-cert and --client-key must be given together"; return 1; }
+        [ -r "$CLIENT_CERT_FILE" ] || { ml_log_error "Client certificate file is not readable"; return 1; }
+        [ -r "$CLIENT_KEY_FILE" ] || { ml_log_error "Client key file is not readable"; return 1; }
+    fi
     case "$AUTH_MODE" in digest|basic|application-level) ;; *) ml_log_error "Invalid authentication mode"; return 1 ;; esac
     if ! ldap_validate_attribute_descriptor "$LDAP_ATTRIBUTE"; then ml_log_error "Invalid LDAP attribute descriptor"; return 1; fi
     case "$SEARCH_SCOPE" in base|one|sub) ;; *) ml_log_error "Search scope must be base, one, or sub"; return 1 ;; esac
@@ -301,6 +314,14 @@ ldap_create_external_security_json() {
     fi
     if [ "$START_TLS" = "true" ]; then
         external_security_json=$(jq -n --argjson config "$external_security_json" '$config + {"ldap-start-tls":true}') || return 1
+    fi
+    if [ -n "$CLIENT_CERT_FILE" ]; then
+        local client_cert_pem client_key_pem
+        client_cert_pem=$(openssl x509 -in "$CLIENT_CERT_FILE" 2>/dev/null) || { ml_log_error "--client-cert is not a valid PEM certificate"; return 1; }
+        client_key_pem=$(openssl pkey -in "$CLIENT_KEY_FILE" -passin pass: 2>/dev/null) || { ml_log_error "--client-key is not a valid unencrypted PEM private key"; return 1; }
+        [ "$(printf '%s\n' "$client_cert_pem" | openssl x509 -noout -pubkey | openssl sha256)" = "$(printf '%s\n' "$client_key_pem" | openssl pkey -pubout | openssl sha256)" ] || { ml_log_error "--client-cert and --client-key do not match"; return 1; }
+        external_security_json=$(printf '%s' "$external_security_json" | jq --arg cert "$client_cert_pem" --arg key "$client_key_pem" \
+            '.["ldap-server"] += {"ldap-certificate":$cert,"ldap-private-key":$key}') || return 1
     fi
     if [ -n "$CERTIFICATE_FILE" ]; then
         [ -f "$CERTIFICATE_FILE" ] || { ml_log_error "Certificate file not found"; return 1; }
@@ -702,6 +723,44 @@ ldap_test_connectivity() {
     return 0
 }
 
+# Report which LDAP identity the server maps a client certificate to (ldapwhoami -Y EXTERNAL).
+# Needs no MarkLogic access. The key is passed via LDAPTLS_* environment variables, never on a command line.
+ldap_whoami() {
+    ml_log_step "Asking the LDAP server who this client certificate maps to (SASL EXTERNAL)"
+    [ -n "$LDAP_SERVER" ] || { ml_log_error "--ldap-server is required"; return 1; }
+    [ -n "$CLIENT_CERT_FILE" ] && [ -n "$CLIENT_KEY_FILE" ] || { ml_log_error "--client-cert and --client-key are required"; return 1; }
+    ldap_validate_server_uri "$LDAP_SERVER" || { ml_log_error "Invalid LDAP server URI"; return 1; }
+    case "$LDAP_SERVER" in
+        ldaps://*) ;;
+        *) [ "$START_TLS" = "true" ] || { ml_log_error "A client certificate needs TLS: use an ldaps:// URI or add --start-tls"; return 1; } ;;
+    esac
+    if [ "$DRY_RUN" = "true" ]; then
+        ml_log_info "[DRY-RUN] Would run: ldapwhoami -H $LDAP_SERVER -Y EXTERNAL with the supplied client certificate"
+        return 0
+    fi
+    command -v ldapwhoami >/dev/null 2>&1 || { ml_log_error "ldapwhoami command not found (install openldap-clients / ldap-utils)"; return 1; }
+    local -a args=(ldapwhoami -H "$LDAP_SERVER" -Y EXTERNAL)
+    [ "$START_TLS" = "true" ] && args+=(-ZZ)
+    local out status
+    local -a tls_env=(LDAPTLS_CERT="$CLIENT_CERT_FILE" LDAPTLS_KEY="$CLIENT_KEY_FILE")
+    [ -z "$CA_FILE" ] || tls_env+=(LDAPTLS_CACERT="$CA_FILE")
+    if out=$(env "${tls_env[@]}" "${args[@]}" 2>&1); then status=0; else status=$?; fi
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$out" | grep -E '^(dn|u):' | sed 's/^/  /'
+        ml_log_success "The server accepted the certificate and mapped it to the identity above"
+        return 0
+    fi
+    ml_log_error "Certificate bind failed"
+    case "$out" in
+        *"Invalid credentials"*) ml_log_error "TLS worked but 389-ds could not map the certificate to an entry (check certmap.conf FilterComps and that the entry has a matching attribute)" ;;
+        *"certificate verify failed"*|*"unable to get local issuer"*) ml_log_error "The server certificate is not trusted: pass --ca-file with the CA that signed it" ;;
+        *"Can't contact"*) ml_log_error "Could not connect to $LDAP_SERVER. Either the host/port is unreachable, or the server rejected the TLS handshake because the client certificate was issued by a CA it does not trust (389-ds logs \"Peer's certificate issuer has been marked as not trusted\")" ;;
+        *"no mechanism available"*|*"Unknown authentication method"*) ml_log_error "This ldapwhoami has no SASL EXTERNAL support (the macOS built-in one does not). Use OpenLDAP from Homebrew (brew install openldap) or a Linux host" ;;
+        *) printf '%s\n' "$out" | tail -2 | sed 's/^/  /' >&2 ;;
+    esac
+    return 1
+}
+
 # Test LDAP user authentication
 ldap_test_user_authentication() {
     if [ "$DRY_RUN" = "true" ]; then
@@ -931,12 +990,13 @@ COMMANDS:
     search-groups              Search for LDAP groups (read-only)
     validate-config            Validate LDAP configuration (read-only)
     show-schema                Show LDAP schema information (read-only)
+    whoami                     Show the LDAP identity a client certificate maps to (read-only, no MarkLogic needed)
 
 CREATE-EXTERNAL-SECURITY OPTIONS:
     --name NAME                   External security name (required)
     --ldap-server URI             LDAP server URI (required)
     --ldap-base DN                LDAP base DN (required)
-    --bind-method METHOD          Bind method: simple, SASL (default: simple)
+    --bind-method METHOD          Bind method: simple (default) or external. MarkLogic 12 has no SASL bind.
     --bind-username USER          Bind username/DN (required)
     --bind-password PASS          Rejected; use LDAP_BIND_PASSWORD or a hidden prompt
     --ldap-attribute ATTR         User attribute (default: uid)
@@ -944,6 +1004,8 @@ CREATE-EXTERNAL-SECURITY OPTIONS:
     --group-dn-template TEMPLATE  Group DN template
     --start-tls                   Enable StartTLS
     --certificate-file FILE       SSL certificate file
+    --client-cert FILE            PEM client certificate MarkLogic presents to the LDAP server (mutual TLS)
+    --client-key FILE             PEM private key for --client-cert (unencrypted)
     --force                       Overwrite existing external security
 
 CONFIGURE-APPSERVER OPTIONS:
@@ -978,6 +1040,13 @@ DELETE-EXTERNAL-SECURITY OPTIONS:
     --name NAME                   External security name to delete (required)
     --dry-run                     Show what would be deleted without making changes
     --verbose                     Show detailed output
+
+WHOAMI OPTIONS (ldapwhoami -Y EXTERNAL equivalent):
+    --ldap-server URI             ldaps:// URI, or ldap:// with --start-tls (required)
+    --client-cert FILE            PEM client certificate to present (required)
+    --client-key FILE             PEM private key for the certificate (required)
+    --ca-file FILE                CA that signed the LDAP server certificate (optional)
+    --start-tls                   Use StartTLS on an ldap:// URI
 
 SHOW-SCHEMA OPTIONS:
     --external-security NAME      External security name (for LDAP settings)
@@ -1030,6 +1099,15 @@ EXAMPLES:
     # Show LDAP schema
     $0 show-schema --external-security ad-auth
 
+    # Which LDAP identity does my client certificate map to? (like: ldapwhoami -Y EXTERNAL)
+    $0 whoami --ldap-server ldaps://ldap.example.com:636 \\
+        --client-cert client.pem --client-key client.key --ca-file ca.pem
+
+    # Create external security whose MarkLogic->LDAP connection uses mutual TLS
+    $0 create-external-security --name ldap-mtls --ldap-server ldaps://ldap.example.com:636 \\
+        --ldap-base "dc=example,dc=com" --bind-username "cn=svc,dc=example,dc=com" \\
+        --client-cert client.pem --client-key client.key
+
     # Delete external security
     $0 delete-external-security --name ad-auth
 
@@ -1058,7 +1136,7 @@ parse_arguments() {
     # Parse remaining arguments including common ones
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --name|--external-security|--ldap-server|--ldap-base|--bind-method|--bind-username|--ldap-attribute|--user-dn-template|--group-dn-template|--certificate-file|--appserver|--auth-mode|--test-user|--search-base|--search-filter|--search-scope|--max-results|--marklogic-host|--marklogic-port|--marklogic-user)
+            --name|--external-security|--ldap-server|--ldap-base|--bind-method|--bind-username|--ldap-attribute|--user-dn-template|--group-dn-template|--certificate-file|--client-cert|--client-key|--ca-file|--appserver|--auth-mode|--test-user|--search-base|--search-filter|--search-scope|--max-results|--marklogic-host|--marklogic-port|--marklogic-user)
                 if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then ml_log_error "$1 requires a non-empty value"; return 1; fi
                 ;;
         esac
@@ -1110,6 +1188,18 @@ parse_arguments() {
                 ;;
             --certificate-file)
                 CERTIFICATE_FILE="$2"
+                shift 2
+                ;;
+            --client-cert)
+                CLIENT_CERT_FILE="$2"
+                shift 2
+                ;;
+            --client-key)
+                CLIENT_KEY_FILE="$2"
+                shift 2
+                ;;
+            --ca-file)
+                CA_FILE="$2"
                 shift 2
                 ;;
             --appserver)
@@ -1356,6 +1446,9 @@ main() {
             ;;
         show-schema)
             ldap_show_schema
+            ;;
+        whoami)
+            ldap_whoami
             ;;
         delete-external-security)
             ldap_delete_external_security
