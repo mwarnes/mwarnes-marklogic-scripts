@@ -17,6 +17,24 @@
 
 set -e
 
+case "${1:-}" in
+    -h|--help)
+        cat << 'EOF'
+Usage: example-marklogic-client-auth.sh [--help]
+
+Worked example: create a private CA (if ca-certificate.pem/ca-private-key.pem are absent in
+this directory), then issue two client certificates (john.doe, jane.smith) suitable for
+MarkLogic certificate authentication (Extended Key Usage: clientAuth).
+
+Run it in an empty scratch directory copy; files are written next to the scripts.
+Set TLS_CA_PASSWORD (CA key) beforehand; a throw-away value is generated if unset.
+EOF
+        exit 0 ;;
+    "") ;;
+    *) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+esac
+export TLS_CA_PASSWORD="${TLS_CA_PASSWORD:-$(openssl rand -hex 16)}"
+
 # Navigate to the TLS scripts directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -32,8 +50,7 @@ if [ ! -f "ca-certificate.pem" ] || [ ! -f "ca-private-key.pem" ]; then
     ./generate-ca-certificate.sh create-ca \
         --cn "MarkLogic-Test-CA" \
         --org "MarkLogic Security Testing" \
-        --country "US" \
-        --password "marklogic123"
+        --country "US"
     echo
 else
     echo "Step 1: Using existing Certificate Authority..."
@@ -55,8 +72,7 @@ echo "Step 3: Signing client certificate with CA..."
     --ca-cert ca-certificate.pem \
     --ca-key ca-private-key.pem \
     --csr john.doe.csr \
-    --output john.doe-client-certificate.pem \
-    --password "testpass123"
+    --output john.doe-client-certificate.pem
 
 echo
 echo "Step 4: Generating additional test user certificate..."
@@ -71,8 +87,7 @@ echo "Step 4: Generating additional test user certificate..."
     --ca-cert ca-certificate.pem \
     --ca-key ca-private-key.pem \
     --csr jane.smith.csr \
-    --output jane.smith-client-certificate.pem \
-    --password "testpass123"
+    --output jane.smith-client-certificate.pem
 
 echo
 echo "==================================================================="

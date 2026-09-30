@@ -79,7 +79,7 @@ Read-only verification of MarkLogic authentication configurations using the Mana
 
 OPTIONS:
     --config-name NAME            Name of configuration to verify
-    --config-type TYPE            Type: oauth2, saml, ldap, kerberos, tls
+    --config-type TYPE            Type: oauth2, saml, ldap, kerberos, tls (certificate template), appserver, list
     --marklogic-host HOST         MarkLogic host (default: oauth.warnesnet.com)
     --marklogic-port PORT         MarkLogic port (default: 8002)
     --marklogic-user USER         MarkLogic user (default: admin)
@@ -217,6 +217,41 @@ verify_external_security() {
             return 1
             ;;
     esac
+}
+
+# Verify a TLS certificate template exists and report its certificate(s)
+verify_tls_template() {
+    local template_name="$1" template_path response status_code body count i days end cn
+    log_info "Verifying certificate template: $template_name"
+    template_path=$(api_path_segment "$template_name") || return 1
+    response=$(ml_api_request GET "/manage/v2/certificate-templates/$template_path?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") || return 1
+    status_code=$(ml_extract_status_code "$response")
+    case "$status_code" in
+        200) log_success "Certificate template found: $template_name" ;;
+        404) log_error "Certificate template not found: $template_name"; return 1 ;;
+        401) log_error "Authentication failed - check credentials"; return 1 ;;
+        *) log_error "Failed to retrieve certificate template (HTTP $status_code)"; return 1 ;;
+    esac
+    response=$(ml_api_request POST "/manage/v2/certificate-templates/$template_path?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" '{"operation":"get-certificates-for-template"}') || return 1
+    [ "$(ml_extract_status_code "$response")" = "200" ] || { log_error "Could not read certificates for the template"; return 1; }
+    body=$(ml_extract_response_body "$response")
+    count=$(printf '%s' "$body" | jq '[."certificate-list".certificate[]? | select((.authority|tostring) != "true")] | length')
+    if [ "${count:-0}" -eq 0 ]; then
+        log_warning "Template has no certificate installed (pending CSR or not yet imported)"
+        return 0
+    fi
+    for ((i=0; i<count; i++)); do
+        local pem
+        pem=$(printf '%s' "$body" | jq -r --argjson i "$i" '[."certificate-list".certificate[]? | select((.authority|tostring) != "true")][$i].pem')
+        end=$(printf '%s\n' "$pem" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+        cn=$(printf '%s\n' "$pem" | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/^subject=//')
+        if printf '%s\n' "$pem" | openssl x509 -noout -checkend 0 >/dev/null 2>&1; then
+            log_success "Certificate $((i+1)): $cn (expires $end)"
+        else
+            log_error "Certificate $((i+1)): $cn EXPIRED $end"; return 1
+        fi
+    done
+    return 0
 }
 
 # Verify app server configuration
@@ -405,7 +440,8 @@ main() {
     case "$CONFIG_TYPE" in
         list) list_external_security ;;
         saml) verify_saml_config "$CONFIG_NAME" ;;
-        oauth2|ldap|kerberos|tls) verify_external_security "$CONFIG_NAME" ;;
+        oauth2|ldap|kerberos) verify_external_security "$CONFIG_NAME" ;;
+        tls) verify_tls_template "$CONFIG_NAME" ;;
         appserver) verify_appserver_config "$APPSERVER_NAME" ;;
     esac
 }
