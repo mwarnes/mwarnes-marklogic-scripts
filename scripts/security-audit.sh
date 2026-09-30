@@ -527,67 +527,45 @@ audit_generate_text_report() {
     fi
 }
 
-audit_generate_json_report() {
-    local all_findings="$1"
-
-    local json_findings=""
-    local count_critical=0
-    local count_warning=0
-    local count_info=0
-
-    while IFS='|' read -r category severity message priority; do
-        [ -z "$category" ] && continue
-
-        case "$severity" in
-            CRITICAL) ((count_critical++)) ;;
-            WARNING) ((count_warning++)) ;;
-            INFO) ((count_info++)) ;;
-        esac
-
-        if [ -n "$json_findings" ]; then
-            json_findings="${json_findings},"
-        fi
-
-        # Escape double quotes in message
-        message=$(echo "$message" | sed 's/"/\\"/g')
-
-        json_findings="${json_findings}
-    {
-      \"category\": \"$category\",
-      \"severity\": \"$severity\",
-      \"message\": \"$message\",
-      \"priority\": \"$priority\"
-    }"
-    done <<< "$all_findings"
-
-    cat << EOF
-{
-  "audit_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "marklogic_host": "$MARKLOGIC_HOST",
-  "summary": {
-    "critical": $count_critical,
-    "warning": $count_warning,
-    "info": $count_info
-  },
-  "findings": [$json_findings
-  ]
+# Findings arrive as "CATEGORY|SEVERITY|message|priority" lines; turn them into a JSON array.
+audit_findings_json() {
+    printf '%s\n' "$1" | jq -Rn '[inputs | select(length > 0) | split("|")
+        | {category: .[0], severity: .[1], message: (.[2] // ""), priority: (.[3] // "")}]'
 }
-EOF
+
+audit_generate_json_report() {
+    local findings
+    findings=$(audit_findings_json "$1") || return 1
+    jq -n --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg host "$MARKLOGIC_HOST" --argjson f "$findings" '{
+        audit_date: $date,
+        marklogic_host: $host,
+        summary: {
+            critical: ([$f[] | select(.severity == "CRITICAL")] | length),
+            warning:  ([$f[] | select(.severity == "WARNING")]  | length),
+            info:     ([$f[] | select(.severity == "INFO")]     | length),
+            errors:   ([$f[] | select(.severity == "ERROR")]    | length)
+        },
+        findings: $f
+    }'
 }
 
 audit_generate_html_report() {
-    local all_findings="$1"
-
-    # Similar to monitor-certificate-expiry.sh HTML report
-    # Generate HTML with Bootstrap styling
-    # This would be a full HTML report (omitted for brevity but would follow same pattern)
-
-    echo "<!DOCTYPE html>"
-    echo "<html><head><title>Security Audit Report</title></head>"
-    echo "<body><h1>Security Audit Report</h1>"
-    echo "<p>Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)</p>"
-    echo "<p>MarkLogic Host: $MARKLOGIC_HOST</p>"
-    echo "</body></html>"
+    local findings rows
+    findings=$(audit_findings_json "$1") || return 1
+    rows=$(printf '%s' "$findings" | jq -r '.[] | "<tr class=\"" + (.severity | ascii_downcase) + "\"><td>" +
+        (.category|@html) + "</td><td>" + (.severity|@html) + "</td><td>" + (.message|@html) + "</td></tr>"')
+    cat << EOF
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Security Audit Report</title>
+<style>body{font-family:sans-serif}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}
+tr.critical{background:#f8d7da}tr.warning{background:#fff3cd}tr.error{background:#e2e3e5}</style></head>
+<body><h1>Security Audit Report</h1>
+<p>Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)</p>
+<p>MarkLogic Host: $(printf '%s' "$MARKLOGIC_HOST" | jq -Rr @html)</p>
+<table><tr><th>Category</th><th>Severity</th><th>Finding</th></tr>
+$rows
+</table></body></html>
+EOF
 }
 
 # ================================================================
@@ -625,6 +603,7 @@ main() {
                 ;;
             --export-json)
                 EXPORT_JSON=true
+                OUTPUT_FORMAT=json
                 shift
                 ;;
             --cert-warning-days)
