@@ -23,7 +23,7 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 
 | Area | Status |
 |------|--------|
-| `TLS/`: `configure-marklogic-tls.sh`, `generate-ca-certificate.sh`, `generate-csr.sh`, `validate-tls.sh`, `validate-certificate-type.sh`, `monitor-certificate-expiry.sh` | Tested against MarkLogic 12.1 (CSR-matched certificate import via the Management API is **not yet verified**) |
+| `TLS/`: `configure-marklogic-tls.sh`, `generate-ca-certificate.sh`, `generate-csr.sh`, `validate-tls.sh`, `validate-certificate-type.sh`, `monitor-certificate-expiry.sh` | Tested against MarkLogic 12.1, including both certificate-import routes (MarkLogic-generated CSR and external key pair) |
 | `security-audit.sh`, `verify-marklogic-config.sh`, `configure-appserver-security.sh`, `rotate-credentials.sh` (dry-run) | Tested read-only / dry-run |
 | Other `TLS/` scripts (`renew-certificates.sh`, `marklogic-cert-deploy*.sh`, `setup-*`, `example-*`) | **QA in progress** |
 | `OAUTH/`, `SAML/`, `LDAP/`, `Kerberos/` | **Not yet QA-tested**: review before use |
