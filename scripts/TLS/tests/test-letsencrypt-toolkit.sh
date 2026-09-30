@@ -258,14 +258,11 @@ ML_CERT_TEMPLATE=Smoke
 EOF_CONFIG
 )
 
-# Verify config has restrictive permissions (0600)
-PERMS=$(stat -f %OLp "$CONFIG_FILE" 2>/dev/null || stat -c %a "$CONFIG_FILE" 2>/dev/null || echo "unknown")
-if [[ "$PERMS" != "600" && "$PERMS" != "-rw-------" ]]; then
-  # Some systems return different formats; just verify it's not world-readable
-  TEST_PERMS=$(test -r "$CONFIG_FILE" -a ! -r "$CONFIG_FILE" -o "$PERMS" = "600" && echo "ok" || echo "bad")
-  if [[ "$TEST_PERMS" != "ok" ]]; then
-    echo "WARNING: Config file permissions may not be restrictive enough: $PERMS"
-  fi
+# Verify config has restrictive permissions (0600); GNU stat first (BSD "stat -f" means something else on Linux)
+PERMS=$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE" 2>/dev/null || echo "unknown")
+if [[ "$PERMS" != "600" ]]; then
+  echo "Config file permissions are not 0600: $PERMS" >&2
+  exit 1
 fi
 
 # Create empty certificate directory (RENEWED_LINEAGE)
