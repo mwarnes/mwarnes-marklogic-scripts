@@ -136,61 +136,66 @@ audit_check_certificates() {
         return 0
     fi
 
-    # Check each template
+    # Check each template. The certificates live behind the template's
+    # get-certificates-for-template operation (there is no PEM in /properties).
     while IFS= read -r template; do
         [ -z "$template" ] && continue
 
-        # Get certificate from template
-        local template_path cert_response cert_status cert_body
+        local template_path cert_response cert_body pems pem temp_cert end_epoch days_remaining
         template_path=$(audit_path_segment "$template") || continue
-        cert_response=$(audit_get "/manage/v2/certificate-templates/$template_path/properties?format=json") || continue
-        cert_status=$(ml_extract_status_code "$cert_response")
+        if ! cert_response=$(ml_api_request POST "/manage/v2/certificate-templates/$template_path?format=json" \
+                "$MARKLOGIC_USER" "$MARKLOGIC_PASS" '{"operation":"get-certificates-for-template"}'); then
+            findings="${findings}
+CERTIFICATE|ERROR|Could not read certificates for template '$template'|MEDIUM"
+            continue
+        fi
+        if [ "$(ml_extract_status_code "$cert_response")" != "200" ]; then
+            findings="${findings}
+CERTIFICATE|ERROR|Could not read certificates for template '$template' (HTTP $(ml_extract_status_code "$cert_response"))|MEDIUM"
+            continue
+        fi
         cert_body=$(ml_extract_response_body "$cert_response")
 
-        if [ "$cert_status" != "200" ]; then
-            continue
-        fi
-
-        # Extract certificate
-        local cert_pem
-        cert_pem=$(echo "$cert_body" | jq -r '.["certificate-template-properties"]["template-certificate"]? // empty' 2>/dev/null)
-
-        if [ -z "$cert_pem" ]; then
-            continue
-        fi
-
-        # Check expiry
-        local temp_cert
-        temp_cert=$(mktemp)
-        echo "$cert_pem" > "$temp_cert"
-
-        local days_remaining
-        if days_remaining=$(openssl x509 -in "$temp_cert" -noout -checkend 0 2>/dev/null); then
-            # Get exact days
-            local expiry_date
-            expiry_date=$(openssl x509 -in "$temp_cert" -noout -enddate 2>/dev/null | cut -d'=' -f2)
-            local expiry_epoch now_epoch
-            expiry_epoch=$(date -j -f "%b %d %H:%M:%S %Y %Z" "$expiry_date" "+%s" 2>/dev/null || date -d "$expiry_date" "+%s" 2>/dev/null)
-            now_epoch=$(date "+%s")
-            days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
-
-            if [ "$days_remaining" -le "$CERT_CRITICAL_DAYS" ]; then
-                findings="${findings}
-CERTIFICATE|CRITICAL|Certificate '$template' expires in $days_remaining days|HIGH"
-                ((critical_count++))
-            elif [ "$days_remaining" -le "$CERT_WARNING_DAYS" ]; then
-                findings="${findings}
-CERTIFICATE|WARNING|Certificate '$template' expires in $days_remaining days|MEDIUM"
-                ((warning_count++))
-            fi
-        else
+        # Host certificates only (skip CA/authority entries); base64 keeps multi-line PEMs on one line.
+        pems=$(printf '%s' "$cert_body" | jq -r '."certificate-list".certificate[]? | select((.authority|tostring) != "true") | (.pem // empty) | @base64' 2>/dev/null)
+        if [ -z "$pems" ]; then
             findings="${findings}
-CERTIFICATE|CRITICAL|Certificate '$template' has expired|HIGH"
-            ((critical_count++))
+CERTIFICATE|INFO|Template '$template' has no certificate installed|LOW"
+            continue
         fi
 
-        rm -f "$temp_cert"
-
+        while IFS= read -r pem; do
+            [ -z "$pem" ] && continue
+            temp_cert=$(mktemp) || continue
+            printf '%s' "$pem" | base64 -d > "$temp_cert" 2>/dev/null || printf '%s' "$pem" | base64 -D > "$temp_cert" 2>/dev/null
+            if ! openssl x509 -in "$temp_cert" -noout >/dev/null 2>&1; then
+                findings="${findings}
+CERTIFICATE|ERROR|Template '$template' holds an unreadable certificate|MEDIUM"
+            elif ! openssl x509 -in "$temp_cert" -noout -checkend 0 >/dev/null 2>&1; then
+                findings="${findings}
+CERTIFICATE|CRITICAL|Certificate in template '$template' has expired|HIGH"
+                critical_count=$((critical_count + 1))
+            else
+                # BSD date (macOS) first, then GNU date (Linux)
+                end_epoch=$(openssl x509 -in "$temp_cert" -noout -enddate | cut -d= -f2)
+                end_epoch=$(date -u -j -f "%b %e %H:%M:%S %Y %Z" "$end_epoch" +%s 2>/dev/null || date -u -d "$end_epoch" +%s 2>/dev/null || echo "")
+                days_remaining=""
+                [ -z "$end_epoch" ] || days_remaining=$(( (end_epoch - $(date -u +%s)) / 86400 ))
+                if [ -z "$days_remaining" ]; then
+                    findings="${findings}
+CERTIFICATE|ERROR|Could not compute expiry for template '$template'|MEDIUM"
+                elif [ "$days_remaining" -le "$CERT_CRITICAL_DAYS" ]; then
+                    findings="${findings}
+CERTIFICATE|CRITICAL|Certificate in template '$template' expires in $days_remaining days|HIGH"
+                    critical_count=$((critical_count + 1))
+                elif [ "$days_remaining" -le "$CERT_WARNING_DAYS" ]; then
+                    findings="${findings}
+CERTIFICATE|WARNING|Certificate in template '$template' expires in $days_remaining days|MEDIUM"
+                    warning_count=$((warning_count + 1))
+                fi
+            fi
+            rm -f "$temp_cert"
+        done <<< "$pems"
     done <<< "$templates"
 
     ml_log_info "Certificate audit: $critical_count critical, $warning_count warnings"
