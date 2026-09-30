@@ -89,6 +89,7 @@ START_TLS="false"
 CERTIFICATE_FILE=""
 APPSERVER_NAME=""
 AUTH_MODE="digest"
+APPSERVER_GROUP="${APPSERVER_GROUP:-Default}"
 SEARCH_FILTER=""
 SEARCH_BASE=""
 SEARCH_SCOPE="sub"
@@ -492,7 +493,7 @@ ldap_configure_appserver() {
 
     # Get current app server configuration
     local response status_code
-    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties" \
+    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties?group-id=$APPSERVER_GROUP&format=json" \
         "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
         status_code=$(ml_extract_status_code "$response")
     else
@@ -518,7 +519,7 @@ ldap_configure_appserver() {
     fi
 
     # Update app server configuration
-    if ml_api_call_with_dryrun response "PUT" "/manage/v2/servers/$appserver_path/properties" \
+    if ml_api_call_with_dryrun response "PUT" "/manage/v2/servers/$appserver_path/properties?group-id=$APPSERVER_GROUP" \
         "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$ldap_config"; then
         status_code=$(ml_extract_status_code "$response")
     else
@@ -769,7 +770,7 @@ ldap_test_marklogic_authentication() {
 
     # Get app server port
     local response status_code app_server_port response_body
-    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties?format=json" \
+    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties?group-id=$APPSERVER_GROUP&format=json" \
         "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
         status_code=$(ml_extract_status_code "$response")
     else
@@ -949,6 +950,7 @@ CONFIGURE-APPSERVER OPTIONS:
     --appserver NAME              App server name (required)
     --external-security NAME      External security name (required)
     --auth-mode MODE              Authentication mode: digest, basic, application-level (default: digest)
+    --group NAME                  MarkLogic group containing the app server (default: Default)
 
 TEST-LDAP OPTIONS:
     --external-security NAME      External security name (required)
@@ -1118,6 +1120,10 @@ parse_arguments() {
                 AUTH_MODE="$2"
                 shift 2
                 ;;
+            --group)
+                APPSERVER_GROUP="$2"
+                shift 2
+                ;;
             --test-user)
                 TEST_USER="$2"
                 shift 2
@@ -1232,14 +1238,14 @@ load_ldap_settings() {
                 local response_body
                 response_body=$(ml_extract_response_body "$response")
 
-                LDAP_SERVER=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-server"]["ldap-server-uri"] // .["ldap-server"]["ldap-server-uri"] // .["ldap-server-uri"] // empty')
-                LDAP_BASE=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-server"]["ldap-base"] // .["ldap-server"]["ldap-base"] // .["ldap-base"] // empty')
-                LDAP_USERNAME=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-server"]["ldap-default-user"] // .["ldap-server"]["ldap-default-user"] // .["ldap-username"] // empty')
-                LDAP_BIND_METHOD=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-server"]["ldap-bind-method"] // .["ldap-server"]["ldap-bind-method"] // .["ldap-bind-method"] // "simple"')
-                LDAP_ATTRIBUTE=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-server"]["ldap-attribute"] // .["ldap-server"]["ldap-attribute"] // .["ldap-attribute"] // "uid"')
+                LDAP_SERVER=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-server"]["ldap-server-uri"] // .["ldap-server"]["ldap-server-uri"] // .["ldap-server-uri"] // empty')
+                LDAP_BASE=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-server"]["ldap-base"] // .["ldap-server"]["ldap-base"] // .["ldap-base"] // empty')
+                LDAP_USERNAME=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-server"]["ldap-default-user"] // .["ldap-server"]["ldap-default-user"] // .["ldap-username"] // empty')
+                LDAP_BIND_METHOD=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-server"]["ldap-bind-method"] // .["ldap-server"]["ldap-bind-method"] // .["ldap-bind-method"] // "simple"')
+                LDAP_ATTRIBUTE=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-server"]["ldap-attribute"] // .["ldap-server"]["ldap-attribute"] // .["ldap-attribute"] // "uid"')
 
                 local start_tls_val
-                start_tls_val=$(echo "$response_body" | jq -r '.["external-security-properties"]["ldap-start-tls"] // .["ldap-start-tls"] // false')
+                start_tls_val=$(echo "$response_body" | jq -r '(.["external-security-default"] // .["external-security-properties"] // .)["ldap-start-tls"] // .["ldap-start-tls"] // false')
                 if [ "$start_tls_val" = "true" ]; then
                     START_TLS="true"
                 fi
