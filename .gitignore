@@ -1,0 +1,12 @@
+*.bak
+*.bak2
+*.orig
+*.pem
+*.csr
+*.key
+*.srl
+*.p12
+*.rollback.json
+*.env
+!*.env.example
+.DS_Store
