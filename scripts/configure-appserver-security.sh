@@ -102,7 +102,7 @@ Configures MarkLogic app servers to use external security configurations.
 OPTIONS:
     --appserver NAMES             App server name(s) - comma-separated for multiple (required)
     --external-security NAME      External security configuration name
-    --authentication-method TYPE  Authentication method (oauth, saml, ldap, etc.) - REQUIRED when configuring security
+    --authentication-method TYPE  oauth, saml, ldap (applied as basic), kerberos (kerberos-ticket), certificate, basic - REQUIRED when configuring security
     --show-current                Show current app server security configuration (read-only)
     --remove-security             Remove external security (set authentication to basic)
     --list-appservers             List all available app servers (read-only)
@@ -259,7 +259,7 @@ show_appserver_security() {
     
     local authentication external_security
     authentication=$(echo "$config" | jq -r '.authentication // "basic"')
-    external_security=$(echo "$config" | jq -r '."external-security" // "none"')
+    external_security=$(echo "$config" | jq -r '(."external-security" // "none") | if type == "array" then (.[0] // "none") else . end')
     
     echo
     echo "  Authentication: $authentication"
@@ -275,8 +275,8 @@ show_appserver_security() {
         if [ "$ext_status" = "200" ]; then
             ext_body=$(ml_extract_response_body "$ext_response")
             local auth_type description
-            auth_type=$(echo "$ext_body" | jq -r '.authentication // "unknown"')
-            description=$(echo "$ext_body" | jq -r '.description // ""')
+            auth_type=$(echo "$ext_body" | jq -r '(.["external-security-default"] // .) | .authentication // "unknown"')
+            description=$(echo "$ext_body" | jq -r '(.["external-security-default"] // .) | .description // ""')
             
             echo "  External Security Type: $auth_type"
             if [ "$description" != "" ]; then
@@ -357,6 +357,13 @@ configure_appserver_security() {
     local authentication_method="basic"
     if [ "$remove_security" != "true" ]; then
         authentication_method="$auth_method"
+        # MarkLogic's app-server "authentication" values are application-level, digest, basic,
+        # digestbasic, certificate, kerberos-ticket, oauth and saml. LDAP has no value of its own:
+        # it is "basic" (or digestbasic) combined with an LDAP external-security object.
+        case "$authentication_method" in
+            ldap) authentication_method="basic"; log_info "LDAP is applied as authentication=basic plus the external-security object" ;;
+            kerberos) authentication_method="kerberos-ticket"; log_info "Kerberos is applied as authentication=kerberos-ticket (MarkLogic requires internal security to be disabled on the app server)" ;;
+        esac
         log_info "Using authentication method: $authentication_method"
     fi
 

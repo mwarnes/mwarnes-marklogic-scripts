@@ -273,7 +273,7 @@ verify_appserver_config() {
             # Extract security configuration
             local auth_mode external_security
             auth_mode=$(echo "$response_body" | jq -r '.authentication // "not set"' 2>/dev/null)
-            external_security=$(echo "$response_body" | jq -r '.["external-security"] // "not set"' 2>/dev/null)
+            external_security=$(echo "$response_body" | jq -r '(.["external-security"] // "not set") | if type == "array" then (if length == 0 then "not set" else join(", ") end) else . end' 2>/dev/null)
             
             log_info "Authentication mode: $auth_mode"
             log_info "External security: $external_security"
