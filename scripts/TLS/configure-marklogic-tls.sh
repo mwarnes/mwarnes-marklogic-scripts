@@ -17,7 +17,7 @@
 # - Certificate validation and testing
 #
 # Author: Martin Warnes
-# Version: 1.0.5
+# Version: 1.0.6
 # Date: September 2026
 #
 # Usage:
@@ -393,15 +393,19 @@ tls_generate_csr() {
     esac
 }
 
-# Import a certificate only after confirmation and a protected prior-state export.
+# Import certificate/key pairs or a certificate matching a pending template CSR.
 tls_import_certificate() {
     ml_log_step "Importing certificate to template: $TEMPLATE_NAME"
-    local template_path template_status response status_code import_json
+    local template_path template_status response status_code import_json import_data import_endpoint content_type
     template_path=$(tls_api_path_segment "$TEMPLATE_NAME") || { ml_log_error "Invalid template name"; return 1; }
     [ -r "$CERT_FILE" ] || { ml_log_error "Certificate file is not readable"; return 1; }
-    [ -r "$KEY_FILE" ] || { ml_log_error "Private-key file is not readable"; return 1; }
+    if [ -n "$KEY_FILE" ]; then [ -r "$KEY_FILE" ] || { ml_log_error "Private-key file is not readable"; return 1; }; fi
     if [ "$DRY_RUN" = "true" ]; then
-        ml_log_info "[DRY-RUN] Would import the selected certificate into the named template; remote state is unknown"
+        if [ -n "$KEY_FILE" ]; then
+            ml_log_info "[DRY-RUN] Would import the supplied certificate/key pair into template '$TEMPLATE_NAME'"
+        else
+            ml_log_info "[DRY-RUN] Would POST the certificate to /manage/v2/certificates for matching against a pending CSR"
+        fi
         return 0
     fi
 
@@ -413,27 +417,59 @@ tls_import_certificate() {
         *) ml_log_error "Could not verify template existence"; return 1 ;;
     esac
     tls_validate_certificate "$CERT_FILE" || return 1
-    tls_verify_cert_key_match "$CERT_FILE" "$KEY_FILE" || return 1
-    if ! ml_confirm "Import certificate into template '$TEMPLATE_NAME'? A protected snapshot will be saved first." n; then
-        ml_log_warning "Certificate import cancelled"
-        return 1
+    if [ -n "$KEY_FILE" ]; then tls_verify_cert_key_match "$CERT_FILE" "$KEY_FILE" || return 1; fi
+    if [ -n "$KEY_FILE" ]; then
+        ml_confirm "Import certificate and matching key into template '$TEMPLATE_NAME'? A protected snapshot will be saved first." n || {
+            ml_log_warning "Certificate import cancelled"
+            return 1
+        }
+    else
+        ml_confirm "Import this certificate by matching it to a pending CSR? A protected template snapshot will be saved first." n || {
+            ml_log_warning "Certificate import cancelled"
+            return 1
+        }
     fi
     tls_backup_resource "/manage/v2/certificate-templates/$template_path" "certificate template '$TEMPLATE_NAME'" || return 1
 
-    if ! import_json=$(jq -n --rawfile cert "$CERT_FILE" --rawfile pkey "$KEY_FILE" \
-        '{"operation":"insert-host-certificates","certificates":[{"certificate":{"cert":$cert,"pkey":$pkey}}]}'); then
-        ml_log_error "Could not build protected certificate import request"
-        return 1
+    if [ -n "$KEY_FILE" ]; then
+        import_json=$(jq -n --rawfile cert "$CERT_FILE" --rawfile pkey "$KEY_FILE" \
+            '{"operation":"insert-host-certificates","certificates":[{"certificate":{"cert":$cert,"pkey":$pkey}}]}') || {
+            ml_log_error "Could not build protected certificate import request"
+            return 1
+        }
+        import_endpoint="/manage/v2/certificate-templates/$template_path"
+        import_data="$import_json"
+        content_type="application/json"
+    else
+        import_data=$(<"$CERT_FILE") || { ml_log_error "Could not read certificate file"; return 1; }
+        import_data+=$'\n'
+        import_endpoint="/manage/v2/certificates?trusted=false&format=html"
+        content_type="text/html"
     fi
 
-    if ! ml_api_call_with_dryrun response "POST" "/manage/v2/certificate-templates/$template_path"         "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$import_json"; then
+    if ! ml_api_call_with_dryrun response "POST" "$import_endpoint" \
+        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$import_data" "$content_type"; then
         ml_log_error "Certificate import request failed"
         return 1
     fi
     status_code=$(ml_extract_status_code "$response")
     case "$status_code" in
-        200|201|204) ml_log_success "Certificate imported to template '$TEMPLATE_NAME'"; return 0 ;;
-        *) ml_log_error "Certificate import failed (HTTP $status_code; response suppressed)"; return 1 ;;
+        200|201|204)
+            if [ -n "$KEY_FILE" ]; then
+                ml_log_success "Certificate imported to template '$TEMPLATE_NAME'"
+            else
+                ml_log_success "Certificate matched to a pending CSR and imported (expected template '$TEMPLATE_NAME')"
+            fi
+            return 0
+            ;;
+        *)
+            if [ "$status_code" = "400" ] && [ -z "$KEY_FILE" ]; then
+                ml_log_error "Certificate was not accepted as a match for a pending CSR (HTTP 400; response suppressed)"
+            else
+                ml_log_error "Certificate import failed (HTTP $status_code; response suppressed)"
+            fi
+            return 1
+            ;;
     esac
 }
 
@@ -641,7 +677,7 @@ GENERATE-CSR OPTIONS:
 IMPORT-CERT OPTIONS:
     --template NAME               Template name (required)
     --cert-file FILE              Certificate file path (required)
-    --key-file FILE               Matching private key (required; use Admin UI for a MarkLogic-generated CSR)
+    --key-file FILE               Matching key for external certificates; omit for a MarkLogic-generated CSR
 
 CONFIGURE-SSL OPTIONS:
     --template NAME               Template name (required)
@@ -676,8 +712,8 @@ EXAMPLES:
     # Generate a CSR with DNS and IP Subject Alternative Names
     $0 generate-csr --template web-ssl --dns-name marklogic.example.com --ip-addr 192.0.2.10 > web-ssl.csr
 
-    # Import signed certificate
-    $0 import-cert --template web-ssl --cert-file signed-cert.pem --key-file signed-key.pem
+    # Import the signed certificate for a MarkLogic-generated CSR
+    $0 import-cert --template web-ssl --cert-file signed-cert.pem
 
     # Import external certificate with private key
     $0 import-cert --template external-ssl --cert-file external.crt --key-file external.key
@@ -825,7 +861,7 @@ parse_arguments() {
 
 # Main execution function
 main() {
-    ml_show_header "MarkLogic TLS Certificate Management" "1.0.5" \
+    ml_show_header "MarkLogic TLS Certificate Management" "1.0.6" \
         "Configure TLS/SSL certificates for MarkLogic Server"
 
     ml_check_dependencies || exit 1
@@ -869,7 +905,7 @@ main() {
         import-cert)
             tls_api_path_segment "$TEMPLATE_NAME" >/dev/null || { ml_log_error "Invalid template name"; exit 1; }
             [ -n "$CERT_FILE" ] && [ -r "$CERT_FILE" ] || { ml_log_error "Readable --cert-file is required"; exit 1; }
-            [ -n "$KEY_FILE" ] && [ -r "$KEY_FILE" ] || { ml_log_error "REST import requires a matching --key-file; use the Admin UI for a MarkLogic-generated CSR"; exit 1; }
+            [ -z "$KEY_FILE" ] || [ -r "$KEY_FILE" ] || { ml_log_error "Private-key file is not readable"; exit 1; }
             ;;
         configure-ssl)
             tls_api_path_segment "$TEMPLATE_NAME" >/dev/null || { ml_log_error "Invalid template name"; exit 1; }
@@ -889,7 +925,10 @@ main() {
         case "$COMMAND" in
             create-template) ml_log_info "[DRY-RUN] Would create or guarded-update certificate template '$TEMPLATE_NAME'; remote state is unknown" ;;
             generate-csr) ml_log_info "[DRY-RUN] Would request a CSR from template '$TEMPLATE_NAME'; no local file will be written" ;;
-            import-cert) ml_log_info "[DRY-RUN] Would import the supplied certificate into '$TEMPLATE_NAME'; no key data was read" ;;
+            import-cert)
+                if [ -n "$KEY_FILE" ]; then ml_log_info "[DRY-RUN] Would import a certificate/key pair into '$TEMPLATE_NAME'"
+                else ml_log_info "[DRY-RUN] Would match the certificate against a pending CSR via /manage/v2/certificates"; fi
+                ;;
             configure-ssl) ml_log_info "[DRY-RUN] Would bind template '$TEMPLATE_NAME' to app server '$APPSERVER_NAME'; remote state is unknown" ;;
             test-ssl) ml_log_info "[DRY-RUN] Would perform a verified TLS handshake; no network probe was made" ;;
             list-templates) ml_log_info "[DRY-RUN] Would list certificate templates; remote state is unknown" ;;
