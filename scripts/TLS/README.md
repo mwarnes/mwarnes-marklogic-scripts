@@ -1,0 +1,407 @@
+# TLS Certificate Management Scripts
+
+This directory contains scripts for managing TLS/SSL certificates in MarkLogic environments, including Certificate Authority (CA) creation, certificate generation, and SSL configuration.
+
+> **Disclaimer:** This is a personal collection of technical work, not official Progress or MarkLogic documentation. The author is employed by Progress; these materials represent personal views. Users are responsible for testing and validating all examples.
+>
+> **Safety and recovery:** The one-shot `setup-complete-marklogic-environment.sh` and `complete-marklogic-appserver-setup.sh` scripts are retained at their existing implementations for later QA. Their multi-step remote changes do not have a reliable rollback; review each stage and use only a disposable environment until they are tested. MarkLogic credentials use `MARKLOGIC_PASS` or a hidden prompt; password-valued CLI flags are rejected. `configure-marklogic-tls.sh` defaults remote Management API connections to HTTPS; loopback HTTP remains available for local testing. That script's `MARKLOGIC_ALLOW_HTTP=true` setting explicitly permits unencrypted remote HTTP for isolated tests only—credentials and private-key payloads are exposed in transit.
+>
+> CA, CSR, export, and PKCS12 generation commands create protected `*.rollback.json` manifests. `--rollback FILE` removes only unchanged files recorded in that manifest, after confirmation. MarkLogic mutations save protected snapshots, but MarkLogic may redact key fields; restore manually when a snapshot is incomplete. Certbot issuance/revocation, package installation, service scheduling, and external DNS/IAM changes are not automatically reversible.
+
+## Sanitized QA outputs (2026-09-29)
+
+These excerpts come from local certificate checks and an isolated MarkLogic QA template/AppServer. Hostnames, template names, and snapshot paths are redacted; no credentials, private keys, or CSR/certificate bodies are included.
+
+**Latest post-restart retest:** on a fresh QA template, CSR signature/SAN and locally issued chain/`serverAuth` checks passed. The certificate-only POST to the documented `/manage/v2/certificates` route returned HTTP 415 both with and without URL-format parameters. A follow-up read-only monitor reported `NO_CERT`, and the pending CSR remained available. No AppServer reconfiguration or TLS handshake followed; the QA template and protected snapshot remain for diagnosis. Local temporary CSR/certificate/CA files were removed. Successful output excerpts below are from earlier QA runs.
+
+### Local CA, CSR, signing, and validation
+
+```text
+[STEP] Creating Certificate Authority: Example-CA
+[SUCCESS] Certificate format is valid: <CA certificate>
+[SUCCESS] CA certificate and private key verification passed
+[WARNING] Protected rollback manifest created: <rollback manifest>
+[SUCCESS] Certificate Authority created; protected rollback manifest records its generated files
+
+[STEP] Generating server certificate CSR for: <test-host>
+[WARNING] Protected rollback manifest created: <rollback manifest>
+[SUCCESS] server certificate CSR created; protected rollback manifest recorded
+[SUCCESS] Operation completed successfully
+
+[STEP] Signing Certificate Signing Request
+[SUCCESS] Certificate signed and saved: <server certificate>
+[WARNING] CA serial number was consumed and is not automatically rolled back
+
+[STEP] Validating certificate and private key pair
+[SUCCESS] Certificate and private key match
+[SUCCESS] Certificate and private key validation passed
+[SUCCESS] Private key format is valid: <encrypted private key>
+[SUCCESS] Certificate chain verification passed
+[INFO] Extended Key Usage: TLS Web Server Authentication
+[SUCCESS] ✓ VALID SERVER CERTIFICATE
+[SUCCESS] ✓ Server-only authentication (correct for TLS encryption)
+```
+
+The chain-file builder also passed a success check and, on forced input-read failure, returned nonzero without leaving a partial chain or rollback manifest.
+
+The verified HTTPS probe returned:
+
+```text
+[STEP] Testing SSL connection to <test-host>:8010
+[SUCCESS] TCP connection to <test-host>:8010 successful
+[SUCCESS] SSL handshake successful
+Protocol: TLSv1.3
+Cipher: TLS_AES_256_GCM_SHA384
+[WARNING] TLS protocol/cipher probes skipped: install timeout or gtimeout; the separate verified handshake can still succeed
+[SUCCESS] === Script Complete ===
+```
+
+### MarkLogic CSR generation and TLS
+
+Generate a CSR from the template common name; provide at most one DNS name and one IP address for the SAN fields supported by MarkLogic's REST operation:
+
+```bash
+export MARKLOGIC_PASS="<from a secret manager>"
+./configure-marklogic-tls.sh generate-csr --template web-ssl \
+  --dns-name web-ssl.example.com > web-ssl.csr
+# After the CA signs the CSR, import its PEM certificate without --key-file:
+./configure-marklogic-tls.sh import-cert --template web-ssl --cert-file web-ssl-signed.pem
+```
+
+`--common-name` can override the template value. `--subject-alt-names` remains a legacy alias for one DNS name; comma-separated lists are rejected rather than silently ignored. For multiple SANs, use the local `generate-csr.sh` flow and import its matching certificate and private key; the MarkLogic-template CSR operation cannot encode multiple names. See the [MarkLogic certificate-template operation](https://docs.marklogic.com/REST/POST/manage/v2/certificate-templates/%5Bid-or-name%5D).
+
+Version 1.0.6 posts `operation: generate-certificate-request` to `/manage/v2/certificate-templates/{name}?format=json`, using the template common name unless overridden. Optional `dns-name` and `ip-addr` fields are sent in the operation body. Remote hosts without a scheme default to HTTPS; remote HTTP requires `MARKLOGIC_ALLOW_HTTP=true` and is intended only for isolated testing. The old `/certificate-requests` path could time out without an HTTP response (`HTTP 000`).
+
+The explicit HTTP test opt-in emits this warning:
+
+```text
+[WARNING] Unencrypted HTTP enabled: Management API credentials and certificate private keys may be exposed on the network
+```
+
+The live CSR-generation capture was:
+
+```text
+[SUCCESS] MarkLogic is accessible at http://<test-host>:8002
+[STEP] Generating CSR from template: <QA template>
+[WARNING] Protected certificate template snapshot saved to <protected snapshot path>
+-----BEGIN CERTIFICATE REQUEST-----
+[CSR contents omitted]
+-----END CERTIFICATE REQUEST-----
+[SUCCESS] === Script Complete ===
+```
+
+OpenSSL verified the generated CSR signature and confirmed the requested DNS SAN. MarkLogic's CSR did not request an Extended Key Usage; ensure the issuing CA marks server certificates for `serverAuth`.
+
+For a certificate signed from a MarkLogic-generated CSR, the documented PEM-only Management API route is [`POST /manage/v2/certificates`](https://docs.marklogic.com/REST/POST/manage/v2/certificates); `trusted` defaults to `false`, matching the certificate to a pending CSR. The separate XQuery [`pki:insert-signed-certificates`](https://docs.marklogic.com/pki:insert-signed-certificates) method also accepts PEM and matches a generated CSR. See the [TLS article's CSR-matched import procedures](../../articles/TLS_CERTIFICATE_MANAGEMENT.md#csr-matched-import-methods) for the manual Query Console method and an HTTP `/v1/eval` candidate (not live-verified). The template-specific `insert-host-certificates` operation requires both certificate and private key; this script uses it only when `--key-file` is supplied. The documented PEM-only Management API request returned `HTTP 415 / REST-INVALIDMIMETYPE` on MarkLogic 12.1.0; no successful import through that route has been verified. The successful import output below is from a separate local-CSR/key-pair path and does not verify CSR-only import.
+
+```text
+[STEP] Importing certificate to template: <QA template>
+[WARNING] Protected certificate template snapshot saved to <protected snapshot path>; server-side redaction may require manual restoration
+[SUCCESS] Certificate imported to template '<QA template>'
+
+[STEP] Configuring SSL for app server: <QA AppServer clone>
+[SUCCESS] SSL configured for app server '<QA AppServer clone>'
+[WARNING] A MarkLogic Server restart may be required; protected snapshot is for manual recovery if needed
+Protocol: TLSv1.3
+Cipher: TLS_AES_256_GCM_SHA384
+Verification: OK
+```
+
+The isolated AppServer handshake passed CA and hostname verification. On this macOS QA host, neither `timeout` nor `gtimeout` is installed, so protocol/cipher matrix probes are explicitly skipped instead of being reported as unsupported. The standalone `validate-tls.sh test-protocols` command returns status `3` when the probe utility is unavailable; verified connection commands still report handshake success with a warning:
+
+```text
+[WARNING] TLS protocol/cipher probes skipped: install timeout or gtimeout; the separate verified handshake can still succeed
+```
+
+### Expiry monitor and deploy-hook dry run
+
+The missing-certificate check returned warning status `3` instead of a false healthy result:
+
+```json
+{
+  "summary": {"expired": 0, "critical": 0, "warning": 0, "info": 0, "ok": 0, "errors": 0, "without_certificate": 1},
+  "certificates": [{"template_name": "<QA template>", "status": "NO_CERT", "detail": "not configured"}]
+}
+```
+
+After the local QA certificate and matching key were imported, the monitor returned:
+
+```json
+{
+  "summary": {"expired": 0, "critical": 0, "warning": 0, "info": 0, "ok": 1, "errors": 0, "without_certificate": 0},
+  "certificates": [{"template_name": "<QA template>", "subject_cn": "<test-host>", "status": "OK", "days_remaining": 3649, "expiry_date": "<expiry date>"}]
+}
+```
+
+```text
+[marklogic-cert-deploy] Would POST renewed certificate material to the configured template; remote state is unknown.
+[marklogic-cert-deploy] Dry run created no temporary files, read no key payload, and made no network request.
+```
+
+The Certbot/Route 53 installer dry-run could not be completed on this macOS host because neither `dnf` nor `yum` is available; no packages or services were changed.
+
+## Let's Encrypt / Certbot Automation
+
+Automated certificate provisioning and renewal for MarkLogic using Let's Encrypt and the Route 53 DNS challenge. Targets RHEL-family distributions (RHEL/Rocky/AlmaLinux 8+, Amazon Linux 2023+) with `dnf` or `yum`.
+
+**What's included:**
+- `setup-certbot-route53.sh` - Idempotent installer for Certbot + Route 53 DNS plugin + MarkLogic deploy hook
+- `marklogic-cert-deploy.sh` - Certbot deploy-hook that pushes renewed certificates into MarkLogic certificate templates via the Management API
+- `marklogic-cert-deploy-wrapper.sh` - Wrapper script for safe config loading
+- `marklogic-cert-deploy.env.example` - Configuration template for MarkLogic connection details
+- `route53-certbot-policy.json.example` - AWS IAM policy for Route 53 DNS challenge
+
+**Prerequisites:**
+- RHEL-family host (RHEL/Rocky/AlmaLinux 8+, Amazon Linux 2023+)
+- AWS Route 53 hosted zone for DNS validation
+- MarkLogic Management API access (port 8002)
+- Root or sudo access for system package installation
+
+**Quick Start:**
+```bash
+# 1. Install Certbot, Route 53 plugin, and MarkLogic deploy hook
+sudo ./setup-certbot-route53.sh
+
+# 1a. (Optional) To explicitly use yum instead of auto-detected dnf:
+sudo ./setup-certbot-route53.sh --package-manager yum
+
+# 2. Configure MarkLogic connection details
+sudoedit /etc/default/marklogic-cert-deploy
+# Edit and set: ML_HOST, ML_PORT, ML_USER, ML_PASSWORD, ML_CERT_TEMPLATE
+
+# 3. Attach Route 53 IAM policy or instance role (see route53-certbot-policy.json.example)
+
+# 4. Test DNS validation with Let's Encrypt staging (does NOT test MarkLogic import)
+certbot certonly --dns-route53 --test-cert --dry-run -d example.com
+
+# 5. Test MarkLogic import with staging certificate
+#    WARNING: Sets ML_CERT_TEMPLATE to a DISPOSABLE test template/server
+#    The deploy hook WILL replace the configured template's certificate
+sudo vi /etc/default/marklogic-cert-deploy  # Set ML_CERT_TEMPLATE=TestTemplate
+certbot certonly --dns-route53 --test-cert -d example.com \
+  --deploy-hook /usr/local/bin/marklogic-cert-deploy-wrapper.sh
+
+# 6. Issue production certificate (change ML_CERT_TEMPLATE back to production first)
+sudo vi /etc/default/marklogic-cert-deploy  # Set ML_CERT_TEMPLATE=ProductionTemplate
+certbot certonly --dns-route53 -d example.com \
+  --deploy-hook /usr/local/bin/marklogic-cert-deploy-wrapper.sh
+```
+
+For detailed setup instructions, troubleshooting, and auto-renewal configuration, see the [TLS Certificate Management article](../../articles/TLS_CERTIFICATE_MANAGEMENT.md).
+
+## 🔐 Certificate Types
+
+### Server Certificates
+Server certificates are used for TLS/SSL encryption on web servers and have:
+- **Extended Key Usage**: `serverAuth` (TLS Web Server Authentication)
+- **Subject Alternative Names**: DNS names and IP addresses
+- **Purpose**: Encrypt traffic between clients and servers
+
+```bash
+# Generate server certificate
+./generate-csr.sh server-csr \
+    --cn "server.example.com" \
+    --dns "server.example.com,*.server.example.com" \
+    --ip "192.0.2.42"
+```
+
+### Client Certificates  
+Client certificates are used for user authentication and have:
+- **Extended Key Usage**: `clientAuth` (TLS Web Client Authentication)  
+- **Subject Alternative Names**: Email addresses for user identification
+- **Purpose**: Authenticate users to servers (e.g., MarkLogic certificate-based auth)
+
+```bash
+# Generate client certificate for MarkLogic authentication
+./generate-csr.sh client-csr \
+    --cn "john.doe" \
+    --email "john.doe@example.com" \
+    --org "MarkLogic Corp"
+```
+
+**Important**: Client certificates are specifically configured for authentication and cannot be used for server TLS encryption.
+
+## Scripts Overview
+
+### 1. `generate-ca-certificate.sh` - Certificate Authority Generation
+Creates a private key with password protection and root certificate that can be used for signing certificate requests.
+
+**Features:**
+- Generate password-protected private key
+- Create self-signed root certificate
+- Customizable certificate attributes (CN, O, OU, L, C, Email)
+- Support for different key sizes and validity periods
+- Certificate chain validation
+- CA certificate bundle creation
+- CSR signing capability
+
+**Basic Usage:**
+```bash
+# Create CA with default settings (CN=CA1)
+./generate-ca-certificate.sh create-ca
+
+# Create CA with custom attributes
+./generate-ca-certificate.sh create-ca \
+  --cn "CA1" \
+  --org "Example Corp" \
+  --locality "Example City" \
+  --country "US" \
+  --email "ca@example.com"
+
+# Show CA certificate details
+./generate-ca-certificate.sh show-ca --ca-cert ca-certificate.pem
+
+# Sign a Certificate Signing Request
+./generate-ca-certificate.sh sign-csr \
+  --ca-cert ca-certificate.pem \
+  --ca-key ca-private-key.pem \
+  --csr server.csr \
+  --output server-cert.pem
+```
+
+### 2. `configure-marklogic-tls.sh` - MarkLogic TLS Configuration
+Manages TLS/SSL certificates for MarkLogic Server including certificate template creation, CSR generation, certificate import, and SSL configuration.
+
+### 3. `tls-utils.sh` - TLS Utility Functions
+Common utility functions for TLS/SSL certificate management including validation, certificate parsing, and certificate chain verification.
+
+### 4. `validate-tls.sh` - TLS Validation
+Validates TLS configurations and certificates.
+
+### 5. `example-create-ca.sh` - Example Script
+Demonstrates how to create a CA for ca1.example.com with CN=CA1.
+
+## Quick Start - Create a Test CA
+
+For testing purposes, you can quickly create a Certificate Authority:
+
+```bash
+# Run the example script
+./example-create-ca.sh
+```
+
+Or create one manually:
+
+```bash
+# Create CA with password protection
+./generate-ca-certificate.sh create-ca \
+  --cn "CA1" \
+  --org "Example Corp" \
+  --locality "Example City" \
+  --country "US" \
+  --email "ca@example.com"
+```
+
+## Default CA Configuration
+
+The scripts default to creating a CA with these attributes:
+- **Common Name**: CA1
+- **Organization**: Example Corp  
+- **Country**: US
+- **Key Size**: 2048 bits
+- **Validity**: 3650 days (10 years)
+- **Hash Algorithm**: SHA-256
+
+## Certificate Attributes
+
+You can customize any of these certificate attributes:
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--cn` | Common Name | `"CA1"` |
+| `--org` | Organization | `"ACME Corp"` |
+| `--ou` | Organizational Unit | `"IT Department"` |
+| `--locality` | Locality/City | `"New York"` |
+| `--state` | State/Province | `"New York"` |
+| `--country` | Country (2-letter code) | `"US"` |
+| `--email` | Email Address | `"ca@example.com"` |
+
+## Security Best Practices
+
+1. **Private Key Protection**: Always use strong passwords for private keys
+2. **Secure Storage**: Store CA private keys in secure, backed-up locations
+3. **Access Control**: Limit access to CA private keys to authorized personnel only
+4. **Key Rotation**: Plan for regular CA certificate renewal
+5. **Monitoring**: Monitor certificate expiration dates
+
+## File Outputs
+
+After creating a CA, you'll have these files:
+
+- `ca-private-key.pem` - Password-protected private key (keep secure!)
+- `ca-certificate.pem` - Public CA certificate (share with clients)
+- `ca-bundle.pem` - Certificate bundle (same as certificate for root CA)
+
+## Integration with MarkLogic
+
+Use the generated CA certificates with MarkLogic by:
+
+1. Importing the CA certificate into MarkLogic's certificate authority list
+2. Using the CA to sign server certificates for MarkLogic app servers
+3. Configuring client applications to trust the CA certificate
+
+## Examples
+
+### Create Production-Ready CA
+```bash
+./generate-ca-certificate.sh create-ca \
+  --cn "Company-Root-CA" \
+  --org "ACME Corporation" \
+  --ou "Information Technology" \
+  --locality "San Francisco" \
+  --state "California" \
+  --country "US" \
+  --email "pki@acme.com" \
+  --key-size 4096 \
+  --validity 7300
+```
+
+### Sign a Server Certificate
+```bash
+# First create a CSR (usually done on the server)
+openssl req -new -key server-private-key.pem -out server.csr
+
+# Sign it with your CA
+./generate-ca-certificate.sh sign-csr \
+  --ca-cert ca-certificate.pem \
+  --ca-key ca-private-key.pem \
+  --csr server.csr \
+  --output server-certificate.pem
+```
+
+### Verify Your CA
+```bash
+./generate-ca-certificate.sh verify-ca \
+  --ca-cert ca-certificate.pem \
+  --ca-key ca-private-key.pem
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"Cannot read private key"** - Check password and file permissions
+2. **"Certificate format invalid"** - Ensure you're using PEM format
+3. **"OpenSSL not found"** - Install OpenSSL: `brew install openssl` (macOS) or `apt-get install openssl` (Linux)
+
+### Getting Help
+
+```bash
+# Show detailed help
+./generate-ca-certificate.sh --help
+
+# Test commands in dry-run mode
+./generate-ca-certificate.sh create-ca --dry-run
+```
+
+## Dependencies
+
+- OpenSSL 1.1.1+ (recommended 3.0+)
+- Bash 4.0+
+- Standard Unix tools (grep, sed, cut, etc.)
+
+## Related Documentation
+
+- [MarkLogic Security Guide](https://docs.marklogic.com/guide/security)
+- [OpenSSL Documentation](https://www.openssl.org/docs/)
+- [X.509 Certificate Standards](https://tools.ietf.org/html/rfc5280)
