@@ -203,17 +203,22 @@ ldap_check_external_security_exists() {
 ldap_run_search() {
     local bind_dn="$1" password="$2" password_file="" status
     shift 2
-    local -a search_args=("$@")
+    # $1 is the command (ldapsearch); everything after it may include the filter and a list of
+    # attributes to return. Options such as -D/-y/-Z must come BEFORE those positional arguments,
+    # otherwise ldapsearch reads them as attribute names and silently searches anonymously.
+    local cmd="$1"
+    shift
+    local -a bind_args=()
 
     if [ -n "$bind_dn" ] && [ -n "$password" ]; then
         password_file=$(ldap_create_password_file "$password") || return 1
-        search_args+=(-D "$bind_dn" -y "$password_file")
+        bind_args+=(-D "$bind_dn" -y "$password_file")
     elif [ -n "$bind_dn" ] || [ -n "$password" ]; then
         ml_log_error "Both LDAP bind DN and password are required for authenticated searches"
         return 1
     fi
-    [ "$START_TLS" = "true" ] && search_args+=(-Z)
-    if "${search_args[@]}"; then status=0; else status=$?; fi
+    [ "$START_TLS" = "true" ] && bind_args+=(-Z)
+    if "$cmd" ${bind_args[@]+"${bind_args[@]}"} "$@"; then status=0; else status=$?; fi
     [ -z "$password_file" ] || ldap_cleanup_password_file "$password_file"
     return "$status"
 }
