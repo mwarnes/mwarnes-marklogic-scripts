@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$SCRIPT_DIR/marklogic-cert-deploy.sh"
 TMP_DIR="$(mktemp -d)"
+# Isolate from the caller's environment and from /var/lib (tests must run unprivileged).
+unset ML_HOST ML_PORT ML_SCHEME ML_USER ML_PASSWORD ML_CERT_TEMPLATE ML_CA_FILE ML_INSECURE RENEWED_LINEAGE
+export ML_BACKUP_DIR="$TMP_DIR/backups"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "==> Testing basic validation and help"
@@ -74,8 +77,10 @@ for arg in "$@"; do
     printf 'private-key-in-argv\n' >"$MOCK_PKEY_LEAK"
   fi
 done
+method="POST"
 while (($#)); do
   case "$1" in
+    -X) method="$2"; shift 2 ;;
     -o) output_file="$2"; shift 2 ;;
     --data-binary) data_binary_file="$2"; shift 2 ;;
     *) shift ;;
@@ -93,6 +98,8 @@ if [[ -n "$data_binary_file" && "$data_binary_file" == @* ]]; then
   fi
 fi
 printf '{"mock":"response"}\n' >"$output_file"
+# The hook first GETs the template for its protected backup (expects 200), then POSTs.
+if [[ "$method" == "GET" ]]; then printf '200'; exit 0; fi
 printf '%s' "${MOCK_HTTP_CODE:-204}"
 exit "${MOCK_CURL_EXIT:-0}"
 CURL_MOCK
@@ -174,8 +181,8 @@ if ! ML_CERT_TEMPLATE=Smoke ML_PASSWORD=test "$HOOK" --cert-dir "$TMP_DIR/certs"
   cat "$TMP_DIR/dryrun.out" >&2
   exit 1
 fi
-grep -q 'DRY RUN' "$TMP_DIR/dryrun.out"
-grep -q 'validation complete' "$TMP_DIR/dryrun.out"
+grep -q 'Would POST renewed certificate' "$TMP_DIR/dryrun.out"
+grep -q 'made no network request' "$TMP_DIR/dryrun.out"
 if grep -q 'Pushing renewed certificate' "$TMP_DIR/dryrun.out"; then
   echo "Dry-run should not make API calls" >&2
   exit 1

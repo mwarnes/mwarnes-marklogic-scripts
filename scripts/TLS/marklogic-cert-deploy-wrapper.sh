@@ -124,7 +124,7 @@ HOOK_ARGS=()
 [[ "$VERBOSE" == "true" ]] && echo "[wrapper] Executing: $HOOK ${HOOK_ARGS[*]}"
 
 if [[ ${#HOOK_ARGS[@]} -gt 0 ]]; then
-  exec "$HOOK" "${HOOK_ARGS[@]}"
+  exec "$HOOK" ${HOOK_ARGS[@]+"${HOOK_ARGS[@]}"}
 else
   exec "$HOOK"
 fi

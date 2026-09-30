@@ -175,7 +175,7 @@ BACKUP_FILE=$(mktemp "$ML_BACKUP_DIR/template-${ML_CERT_TEMPLATE}.XXXXXX") || fa
 chmod 600 "$BACKUP_FILE" || { rm -f "$BACKUP_FILE"; fail "Could not secure the backup file."; }
 GET_URL="${ML_SCHEME}://${ML_HOST}:${ML_PORT}/manage/v2/certificate-templates/${template_path}/properties?format=json"
 GET_CODE=$(curl -sS --connect-timeout 10 --max-time 30 -K "$CURL_CONFIG" -o "$BACKUP_FILE" -w "%{http_code}" -X GET "$GET_URL" \
-  -H "Accept: application/json" "${CURL_TLS_OPTS[@]}") || { rm -f "$BACKUP_FILE"; fail "Could not read previous certificate-template state."; }
+  -H "Accept: application/json" ${CURL_TLS_OPTS[@]+"${CURL_TLS_OPTS[@]}"}) || { rm -f "$BACKUP_FILE"; fail "Could not read previous certificate-template state."; }
 if [[ "$GET_CODE" != "200" ]] || ! jq -e . "$BACKUP_FILE" >/dev/null 2>&1; then
   rm -f "$BACKUP_FILE"
   fail "Previous certificate-template state is unavailable or invalid; refusing deployment."
@@ -185,7 +185,7 @@ log "Protected previous-state export saved at $BACKUP_FILE; MarkLogic may redact
 CURL_OPTS=(-sS --connect-timeout 10 --max-time 60 -K "$CURL_CONFIG" -o "$RESPONSE_FILE" -w "%{http_code}" \
   -X POST "$URL" \
   -H "Content-Type: application/json" \
-  --data-binary "@$PAYLOAD_FILE" "${CURL_TLS_OPTS[@]}")
+  --data-binary "@$PAYLOAD_FILE" ${CURL_TLS_OPTS[@]+"${CURL_TLS_OPTS[@]}"})
 
 log "Pushing renewed certificate into template '${ML_CERT_TEMPLATE}' at ${URL} ..."
 log_verbose "Calling curl with digest authentication"
