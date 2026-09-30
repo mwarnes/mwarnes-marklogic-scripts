@@ -443,7 +443,8 @@ tls_import_certificate() {
     else
         import_data=$(<"$CERT_FILE") || { ml_log_error "Could not read certificate file"; return 1; }
         import_data+=$'\n'
-        import_endpoint="/manage/v2/certificates?trusted=false&format=html"
+        # The API defaults trusted=false, matching the PEM to a pending CSR.
+        import_endpoint="/manage/v2/certificates"
         content_type="text/html"
     fi
 
