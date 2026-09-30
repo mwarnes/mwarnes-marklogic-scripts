@@ -35,6 +35,8 @@ readonly COLOR_BLUE='\033[0;34m'
 readonly COLOR_CYAN='\033[0;36m'
 readonly COLOR_PURPLE='\033[0;35m'
 readonly COLOR_NC='\033[0m' # No Color
+# Exported with the guard below so child scripts that skip re-sourcing still see them.
+export COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_PURPLE COLOR_NC
 
 # Default timeout for HTTP requests
 readonly DEFAULT_TIMEOUT=30
@@ -42,6 +44,7 @@ readonly DEFAULT_TIMEOUT=30
 # Default MarkLogic ports
 readonly DEFAULT_ADMIN_PORT=8001
 readonly DEFAULT_MANAGE_PORT=8002
+export DEFAULT_TIMEOUT DEFAULT_ADMIN_PORT DEFAULT_MANAGE_PORT
 
 # ================================================================
 # LOGGING FUNCTIONS
