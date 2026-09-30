@@ -378,6 +378,8 @@ tls_get_csr_info() {
 # ================================================================
 
 # Test SSL protocols and cipher suites
+tls_perl_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
+
 tls_test_ssl_protocols() {
     local host="$1"
     local port="$2"
@@ -394,8 +396,11 @@ tls_test_ssl_protocols() {
         timeout_command=timeout
     elif command -v gtimeout >/dev/null 2>&1; then
         timeout_command=gtimeout
+    elif command -v perl >/dev/null 2>&1; then
+        # macOS has no timeout(1): emulate it with perl's alarm
+        timeout_command=tls_perl_timeout
     else
-        ml_log_warning "TLS protocol/cipher probes skipped: install timeout or gtimeout; the separate verified handshake can still succeed"
+        ml_log_warning "TLS protocol/cipher probes skipped: install timeout, gtimeout or perl; the separate verified handshake can still succeed"
         return 3
     fi
 
@@ -410,7 +415,7 @@ tls_test_ssl_protocols() {
         local protocol="${protocols[$i]}"
         local protocol_name="${protocol_names[$i]}"
 
-        if echo | "$timeout_command" 10 openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -"$protocol" -quiet 2>/dev/null >/dev/null; then
+        if echo | "$timeout_command" 10 openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" ${TLS_CA_FILE:+-CAfile "$TLS_CA_FILE"} -"$protocol" -quiet 2>/dev/null >/dev/null; then
             ml_log_success "$protocol_name: Supported"
         else
             ml_log_info "$protocol_name: Not supported"
@@ -434,7 +439,7 @@ tls_test_ssl_protocols() {
     )
 
     for cipher in "${ciphers[@]}"; do
-        if echo | "$timeout_command" 5 openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -cipher "$cipher" -quiet 2>/dev/null >/dev/null; then
+        if echo | "$timeout_command" 5 openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" ${TLS_CA_FILE:+-CAfile "$TLS_CA_FILE"} -cipher "$cipher" -quiet 2>/dev/null >/dev/null; then
             ml_log_success "$cipher: Supported"
         else
             ml_log_info "$cipher: Not supported"
@@ -461,7 +466,7 @@ tls_get_ssl_connection_info() {
     temp_file=$(mktemp) || return 1
     chmod 600 "$temp_file" || { rm -f "$temp_file"; return 1; }
 
-    if echo | openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" 2>/dev/null 1>"$temp_file"; then
+    if echo | openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" ${TLS_CA_FILE:+-CAfile "$TLS_CA_FILE"} 2>/dev/null 1>"$temp_file"; then
         echo "SSL Connection Details:"
         echo "======================"
 
@@ -589,5 +594,5 @@ export -f tls_create_pkcs12
 export -f tls_extract_from_pkcs12
 export -f tls_validate_csr
 export -f tls_get_csr_info
-export -f tls_test_ssl_protocols
+export -f tls_test_ssl_protocols tls_perl_timeout
 export -f tls_get_ssl_connection_info

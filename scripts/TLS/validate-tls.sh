@@ -237,6 +237,7 @@ test_ssl_connection_detailed() {
     echo
 
     # Get detailed connection information
+    export TLS_CA_FILE="${CA_FILE:-${TLS_CA_FILE:-}}"
     tls_get_ssl_connection_info "$HOST" "$PORT" || return 1
 
     echo
@@ -481,7 +482,7 @@ main() {
         check-expiry) tls_check_certificate_expiry "$CERT_FILE" "$WARN_DAYS" || exit_code=$? ;;
         show-cert-info) tls_get_certificate_info "$CERT_FILE" || exit_code=$? ;;
         show-csr-info) tls_get_csr_info "$CSR_FILE" || exit_code=$? ;;
-        test-protocols) tls_test_ssl_protocols "$HOST" "$PORT" || exit_code=$? ;;
+        test-protocols) export TLS_CA_FILE="${CA_FILE:-${TLS_CA_FILE:-}}"; tls_test_ssl_protocols "$HOST" "$PORT" || exit_code=$? ;;
     esac
 
     if [ "$exit_code" -eq 0 ]; then

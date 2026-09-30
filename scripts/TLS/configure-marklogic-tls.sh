@@ -17,7 +17,7 @@
 # - Certificate validation and testing
 #
 # Author: Martin Warnes
-# Version: 1.0.6
+# Version: 1.1.0
 # Date: September 2026
 #
 # Usage:
@@ -77,12 +77,14 @@ EMAIL=""
 KEY_SIZE="2048"
 CERT_FILE=""
 KEY_FILE=""
+EVAL_PORT="${MARKLOGIC_EVAL_PORT:-8000}"
 APPSERVER_NAME=""
 SSL_HOSTNAME=""
 MIN_TLS_VERSION="1.2"
 SSL_PORT=""
 TEST_HOST=""
 TEST_PORT="8443"
+TLS_CA_FILE="${TLS_CA_FILE:-}"
 MARKLOGIC_HOST="${MARKLOGIC_HOST:-localhost}"
 MARKLOGIC_PORT="${MARKLOGIC_PORT:-8002}"
 MARKLOGIC_USER="${MARKLOGIC_USER:-admin}"
@@ -404,7 +406,7 @@ tls_import_certificate() {
         if [ -n "$KEY_FILE" ]; then
             ml_log_info "[DRY-RUN] Would import the supplied certificate/key pair into template '$TEMPLATE_NAME'"
         else
-            ml_log_info "[DRY-RUN] Would POST the certificate to /manage/v2/certificates for matching against a pending CSR"
+            ml_log_info "[DRY-RUN] Would evaluate pki:insert-signed-certificates in the Security database via /v1/eval"
         fi
         return 0
     fi
@@ -432,46 +434,100 @@ tls_import_certificate() {
     tls_backup_resource "/manage/v2/certificate-templates/$template_path" "certificate template '$TEMPLATE_NAME'" || return 1
 
     if [ -n "$KEY_FILE" ]; then
-        import_json=$(jq -n --rawfile cert "$CERT_FILE" --rawfile pkey "$KEY_FILE" \
-            '{"operation":"insert-host-certificates","certificates":[{"certificate":{"cert":$cert,"pkey":$pkey}}]}') || {
-            ml_log_error "Could not build protected certificate import request"
-            return 1
-        }
-        import_endpoint="/manage/v2/certificate-templates/$template_path"
-        import_data="$import_json"
-        content_type="application/json"
+        tls_import_external_pair "$template_path" || return 1
     else
-        import_data=$(<"$CERT_FILE") || { ml_log_error "Could not read certificate file"; return 1; }
-        import_data+=$'\n'
-        # The API defaults trusted=false, matching the PEM to a pending CSR.
-        import_endpoint="/manage/v2/certificates"
-        content_type="text/html"
+        tls_import_signed_for_pending_csr "$template_path" || return 1
     fi
+}
 
-    if ! ml_api_call_with_dryrun response "POST" "$import_endpoint" \
-        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$import_data" "$content_type"; then
+# ROUTE A - certificate and key generated OUTSIDE MarkLogic (external CSR):
+# the private key exists on the client, so both are pushed to the template.
+tls_import_external_pair() {
+    local template_path="$1" import_json response status_code
+    ml_log_info "Route A: externally generated key pair -> insert-host-certificates (Management API)"
+    import_json=$(jq -n --rawfile cert "$CERT_FILE" --rawfile pkey "$KEY_FILE" \
+        '{"operation":"insert-host-certificates","certificates":[{"certificate":{"cert":$cert,"pkey":$pkey}}]}') || {
+        ml_log_error "Could not build protected certificate import request"
+        return 1
+    }
+    if ! ml_api_call_with_dryrun response "POST" "/manage/v2/certificate-templates/$template_path" \
+        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$import_json" "application/json"; then
         ml_log_error "Certificate import request failed"
         return 1
     fi
     status_code=$(ml_extract_status_code "$response")
     case "$status_code" in
-        200|201|204)
-            if [ -n "$KEY_FILE" ]; then
-                ml_log_success "Certificate imported to template '$TEMPLATE_NAME'"
-            else
-                ml_log_success "Certificate matched to a pending CSR and imported (expected template '$TEMPLATE_NAME')"
-            fi
-            return 0
-            ;;
+        200|201|204) ml_log_success "Certificate and key imported to template '$TEMPLATE_NAME'" ;;
+        *) ml_log_error "Certificate import failed (HTTP $status_code; response suppressed)"; return 1 ;;
+    esac
+    tls_verify_template_certificate "$template_path"
+}
+
+# ROUTE B - CSR generated INSIDE MarkLogic (generate-csr): MarkLogic holds the
+# private key, so only the signed PEM is supplied. The Management API has no
+# supported call for this, so pki:insert-signed-certificates is evaluated in the
+# Security database through the /v1/eval endpoint of an app server (default
+# port 8000). The function matches the PEM to a pending CSR and returns nothing,
+# so success is confirmed afterwards by reading the template.
+tls_import_signed_for_pending_csr() {
+    local template_path="$1" xquery vars body response status_code cert_pem
+    ml_log_info "Route B: MarkLogic-generated CSR -> pki:insert-signed-certificates via /v1/eval on port $EVAL_PORT (Security database)"
+    cert_pem=$(<"$CERT_FILE") || { ml_log_error "Could not read certificate file"; return 1; }
+    xquery='xquery version "1.0-ml";
+declare variable $cert as xs:string external;
+xdmp:eval(
+  "xquery version '"'"'1.0-ml'"'"';
+   import module namespace pki = '"'"'http://marklogic.com/xdmp/pki'"'"' at '"'"'/MarkLogic/pki.xqy'"'"';
+   declare variable $cert as xs:string external;
+   pki:insert-signed-certificates($cert)",
+  (xs:QName("cert"), $cert),
+  <options xmlns="xdmp:eval"><database>{xdmp:security-database()}</database></options>)'
+    vars=$(jq -cn --arg cert "$cert_pem" '{cert:$cert}') || return 1
+    body="xquery=$(jq -rn --arg v "$xquery" '$v|@uri')&vars=$(jq -rn --arg v "$vars" '$v|@uri')"
+    if ! response=$(ML_PORT="$EVAL_PORT" ml_api_request "POST" "/v1/eval" \
+        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$body" "application/x-www-form-urlencoded"); then
+        ml_log_error "Could not reach /v1/eval on port $EVAL_PORT (use --eval-port for an app server that allows eval)"
+        return 1
+    fi
+    status_code=$(ml_extract_status_code "$response")
+    case "$status_code" in
+        200) ;;
+        401|403) ml_log_error "Not authorised to evaluate XQuery on port $EVAL_PORT (needs the admin role or xdmp-eval-in / security privileges; HTTP $status_code)"; return 1 ;;
         *)
-            if [ "$status_code" = "400" ] && [ -z "$KEY_FILE" ]; then
-                ml_log_error "Certificate was not accepted as a match for a pending CSR (HTTP 400; response suppressed)"
+            if ml_extract_response_body "$response" | grep -q 'PKI-NOREQ'; then
+                ml_log_error "No pending CSR matches this certificate (PKI-NOREQ). Sign the CSR currently pending on '$TEMPLATE_NAME'; running generate-csr again replaces it, so an earlier signed certificate will no longer match"
             else
-                ml_log_error "Certificate import failed (HTTP $status_code; response suppressed)"
+                ml_log_error "XQuery import failed (HTTP $status_code; response suppressed). Check --eval-port and the MarkLogic ErrorLog"
             fi
             return 1
             ;;
     esac
+    tls_verify_template_certificate "$template_path"
+}
+
+# pki:insert-signed-certificates silently ignores a certificate with no matching
+# pending CSR, so confirm the template now holds the certificate we supplied.
+tls_verify_template_certificate() {
+    local template_path="$1" want have response status_code body
+    want=$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 2>/dev/null) || { ml_log_error "Could not fingerprint the supplied certificate"; return 1; }
+    if ! response=$(ml_api_request "POST" "/manage/v2/certificate-templates/$template_path?format=json" \
+        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" '{"operation":"get-certificates-for-template"}' "application/json"); then
+        ml_log_error "Import was sent but the template could not be read back to verify it"
+        return 1
+    fi
+    status_code=$(ml_extract_status_code "$response")
+    [ "$status_code" = "200" ] || { ml_log_error "Import was sent but verification failed (HTTP $status_code)"; return 1; }
+    body=$(ml_extract_response_body "$response")
+    while IFS= read -r b64; do
+        [ -n "$b64" ] || continue
+        have=$(printf '%s' "$b64" | base64 -d 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null) || continue
+        if [ "$have" = "$want" ]; then
+            ml_log_success "Verified: template '$TEMPLATE_NAME' now holds the imported certificate"
+            return 0
+        fi
+    done < <(printf '%s' "$body" | jq -r '."certificate-list".certificate[]? | (.pem // empty) | @base64')
+    ml_log_error "Template '$TEMPLATE_NAME' does not hold the supplied certificate. For a MarkLogic-generated CSR the certificate must be signed from the CSR currently pending on this template (re-run generate-csr replaces it)"
+    return 1
 }
 
 # Configure one app server after a protected snapshot and explicit confirmation.
@@ -677,8 +733,14 @@ GENERATE-CSR OPTIONS:
 
 IMPORT-CERT OPTIONS:
     --template NAME               Template name (required)
-    --cert-file FILE              Certificate file path (required)
-    --key-file FILE               Matching key for external certificates; omit for a MarkLogic-generated CSR
+    --cert-file FILE              Signed certificate, PEM (required)
+    --key-file FILE               Private key for a CSR generated OUTSIDE MarkLogic (Route A)
+                                  Omit for a CSR generated by 'generate-csr' in MarkLogic (Route B)
+    --eval-port PORT              App server port for Route B /v1/eval (default: 8000, or $MARKLOGIC_EVAL_PORT)
+
+    Route A (--key-file given): insert-host-certificates via the Management API.
+    Route B (no --key-file):    pki:insert-signed-certificates evaluated in the Security database.
+                                The certificate must be signed from the CSR currently pending on the template.
 
 CONFIGURE-SSL OPTIONS:
     --template NAME               Template name (required)
@@ -690,6 +752,7 @@ CONFIGURE-SSL OPTIONS:
 TEST-SSL OPTIONS:
     --host HOSTNAME               Hostname to test (default: localhost)
     --port PORT                   Port to test (default: 8443)
+    --ca-file FILE                CA certificate to trust (needed for private/internal CAs)
 
 TRANSPORT OPTION:
     Remote hostnames default to HTTPS; loopback hosts may use HTTP.
@@ -714,9 +777,10 @@ EXAMPLES:
     $0 generate-csr --template web-ssl --dns-name marklogic.example.com --ip-addr 192.0.2.10 > web-ssl.csr
 
     # Import the signed certificate for a MarkLogic-generated CSR
+    # Import a certificate signed from a CSR generated by MarkLogic (Route B)
     $0 import-cert --template web-ssl --cert-file signed-cert.pem
 
-    # Import external certificate with private key
+    # Import certificate + key generated outside MarkLogic (Route A)
     $0 import-cert --template external-ssl --cert-file external.crt --key-file external.key
 
     # Configure app server SSL
@@ -819,6 +883,10 @@ parse_arguments() {
                 KEY_FILE="$2"
                 shift 2
                 ;;
+            --eval-port)
+                EVAL_PORT="$2"
+                shift 2
+                ;;
             --appserver)
                 APPSERVER_NAME="$2"
                 shift 2
@@ -843,6 +911,10 @@ parse_arguments() {
                 TEST_PORT="$2"
                 shift 2
                 ;;
+            --ca-file)
+                TLS_CA_FILE="$2"
+                shift 2
+                ;;
             --force)
                 FORCE="true"
                 shift
@@ -862,7 +934,7 @@ parse_arguments() {
 
 # Main execution function
 main() {
-    ml_show_header "MarkLogic TLS Certificate Management" "1.0.6" \
+    ml_show_header "MarkLogic TLS Certificate Management" "1.1.0" \
         "Configure TLS/SSL certificates for MarkLogic Server"
 
     ml_check_dependencies || exit 1
@@ -904,6 +976,7 @@ main() {
             tls_validate_csr_sans || exit 1
             ;;
         import-cert)
+            [[ "$EVAL_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$EVAL_PORT" -ge 1 ] && [ "$EVAL_PORT" -le 65535 ] || { ml_log_error "Invalid --eval-port"; exit 1; }
             tls_api_path_segment "$TEMPLATE_NAME" >/dev/null || { ml_log_error "Invalid template name"; exit 1; }
             [ -n "$CERT_FILE" ] && [ -r "$CERT_FILE" ] || { ml_log_error "Readable --cert-file is required"; exit 1; }
             [ -z "$KEY_FILE" ] || [ -r "$KEY_FILE" ] || { ml_log_error "Private-key file is not readable"; exit 1; }
@@ -913,6 +986,8 @@ main() {
             tls_api_path_segment "$APPSERVER_NAME" >/dev/null || { ml_log_error "Invalid app-server name"; exit 1; }
             ;;
         test-ssl)
+            [ -z "$TLS_CA_FILE" ] || [ -r "$TLS_CA_FILE" ] || { ml_log_error "CA file is not readable"; exit 1; }
+            export TLS_CA_FILE
             [ -n "${TEST_HOST:-}" ] || TEST_HOST="${ML_HOST:-localhost}"
             [[ "$TEST_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$TEST_PORT" -ge 1 ] && [ "$TEST_PORT" -le 65535 ] || { ml_log_error "Invalid TLS test port"; exit 1; }
             [[ "$TEST_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { ml_log_error "Invalid TLS test host"; exit 1; }
@@ -927,8 +1002,8 @@ main() {
             create-template) ml_log_info "[DRY-RUN] Would create or guarded-update certificate template '$TEMPLATE_NAME'; remote state is unknown" ;;
             generate-csr) ml_log_info "[DRY-RUN] Would request a CSR from template '$TEMPLATE_NAME'; no local file will be written" ;;
             import-cert)
-                if [ -n "$KEY_FILE" ]; then ml_log_info "[DRY-RUN] Would import a certificate/key pair into '$TEMPLATE_NAME'"
-                else ml_log_info "[DRY-RUN] Would match the certificate against a pending CSR via /manage/v2/certificates"; fi
+                if [ -n "$KEY_FILE" ]; then ml_log_info "[DRY-RUN] Route A: would import a certificate/key pair into '$TEMPLATE_NAME' (insert-host-certificates)"
+                else ml_log_info "[DRY-RUN] Route B: would run pki:insert-signed-certificates in the Security database via /v1/eval on port $EVAL_PORT, then verify the template"; fi
                 ;;
             configure-ssl) ml_log_info "[DRY-RUN] Would bind template '$TEMPLATE_NAME' to app server '$APPSERVER_NAME'; remote state is unknown" ;;
             test-ssl) ml_log_info "[DRY-RUN] Would perform a verified TLS handshake; no network probe was made" ;;
