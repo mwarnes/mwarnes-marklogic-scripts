@@ -83,8 +83,10 @@ LDAP_BIND_METHOD="simple"
 LDAP_USERNAME=""
 LDAP_PASSWORD="${LDAP_BIND_PASSWORD:-}"
 LDAP_ATTRIBUTE="uid"
-USER_DN_TEMPLATE=""
-GROUP_DN_TEMPLATE=""
+AUTHORIZATION="internal"
+MEMBEROF_ATTRIBUTE=""
+MEMBER_ATTRIBUTE=""
+NESTED_LOOKUP="false"
 START_TLS="false"
 CERTIFICATE_FILE=""
 CLIENT_CERT_FILE=""
@@ -249,8 +251,6 @@ ldap_validate_command_inputs() {
     if [ -n "$LDAP_BASE" ] && ! ldap_validate_dn_input "$LDAP_BASE"; then ml_log_error "Invalid LDAP base DN"; return 1; fi
     if [ -n "$LDAP_USERNAME" ] && ! ldap_validate_dn_input "$LDAP_USERNAME"; then ml_log_error "Invalid LDAP bind DN"; return 1; fi
     if [ -n "$SEARCH_BASE" ] && ! ldap_validate_dn_input "$SEARCH_BASE"; then ml_log_error "Invalid LDAP search base DN"; return 1; fi
-    if [ -n "$USER_DN_TEMPLATE" ] && ! ldap_validate_dn_input "${USER_DN_TEMPLATE//\{user\}/x}"; then ml_log_error "Invalid user DN template"; return 1; fi
-    if [ -n "$GROUP_DN_TEMPLATE" ] && ! ldap_validate_dn_input "${GROUP_DN_TEMPLATE//\{group\}/x}"; then ml_log_error "Invalid group DN template"; return 1; fi
     if [ -n "$EXTERNAL_SECURITY_NAME" ] && ! ldap_validate_resource_name "$EXTERNAL_SECURITY_NAME"; then ml_log_error "Invalid external security name"; return 1; fi
     if [ -n "$APPSERVER_NAME" ] && ! ldap_validate_resource_name "$APPSERVER_NAME"; then ml_log_error "Invalid app server name"; return 1; fi
     case "$LDAP_BIND_METHOD" in
@@ -266,6 +266,9 @@ ldap_validate_command_inputs() {
     fi
     case "$AUTH_MODE" in digest|basic|application-level) ;; *) ml_log_error "Invalid authentication mode"; return 1 ;; esac
     if ! ldap_validate_attribute_descriptor "$LDAP_ATTRIBUTE"; then ml_log_error "Invalid LDAP attribute descriptor"; return 1; fi
+    case "$AUTHORIZATION" in internal|ldap) ;; *) ml_log_error "--authorization must be internal or ldap"; return 1 ;; esac
+    if [ -n "$MEMBEROF_ATTRIBUTE" ] && ! ldap_validate_attribute_descriptor "$MEMBEROF_ATTRIBUTE"; then ml_log_error "Invalid --memberof-attribute"; return 1; fi
+    if [ -n "$MEMBER_ATTRIBUTE" ] && ! ldap_validate_attribute_descriptor "$MEMBER_ATTRIBUTE"; then ml_log_error "Invalid --member-attribute"; return 1; fi
     case "$SEARCH_SCOPE" in base|one|sub) ;; *) ml_log_error "Search scope must be base, one, or sub"; return 1 ;; esac
     if ! [[ "$MAX_RESULTS" =~ ^[1-9][0-9]*$ ]]; then ml_log_error "Maximum results must be a positive integer"; return 1; fi
     [ -z "$SEARCH_FILTER" ] || ldap_validate_filter_input "$SEARCH_FILTER" || { ml_log_error "Malformed LDAP search filter"; return 1; }
@@ -306,14 +309,20 @@ ldap_create_external_security_json() {
         --argjson server "$ldap_server_config" \
         '{"external-security-name":$name,"description":"LDAP external security configuration created by script","authentication":"ldap","cache-timeout":"300","authorization":"internal","ldap-server":$server}') || return 1
 
-    if [ -n "$USER_DN_TEMPLATE" ]; then
-        external_security_json=$(jq -n --argjson config "$external_security_json" --arg template "$USER_DN_TEMPLATE" '$config + {"ldap-user-objects":[$template]}') || return 1
+    # authorization "internal" maps the LDAP user to a MarkLogic user through external-name;
+    # "ldap" derives roles from the user's groups using the lookup attributes below.
+    external_security_json=$(printf '%s' "$external_security_json" | jq --arg authz "$AUTHORIZATION" '.authorization = $authz') || return 1
+    if [ -n "$MEMBEROF_ATTRIBUTE" ]; then
+        external_security_json=$(printf '%s' "$external_security_json" | jq --arg v "$MEMBEROF_ATTRIBUTE" '.["ldap-server"]["ldap-memberof-attribute"] = $v') || return 1
     fi
-    if [ -n "$GROUP_DN_TEMPLATE" ]; then
-        external_security_json=$(jq -n --argjson config "$external_security_json" --arg template "$GROUP_DN_TEMPLATE" '$config + {"ldap-group-objects":[$template]}') || return 1
+    if [ -n "$MEMBER_ATTRIBUTE" ]; then
+        external_security_json=$(printf '%s' "$external_security_json" | jq --arg v "$MEMBER_ATTRIBUTE" '.["ldap-server"]["ldap-member-attribute"] = $v') || return 1
+    fi
+    if [ "$NESTED_LOOKUP" = "true" ]; then
+        external_security_json=$(printf '%s' "$external_security_json" | jq '.["ldap-server"]["ldap-nested-lookup"] = true') || return 1
     fi
     if [ "$START_TLS" = "true" ]; then
-        external_security_json=$(jq -n --argjson config "$external_security_json" '$config + {"ldap-start-tls":true}') || return 1
+        external_security_json=$(printf '%s' "$external_security_json" | jq '.["ldap-server"]["ldap-start-tls"] = true') || return 1
     fi
     if [ -n "$CLIENT_CERT_FILE" ]; then
         local client_cert_pem client_key_pem
@@ -325,7 +334,7 @@ ldap_create_external_security_json() {
     fi
     if [ -n "$CERTIFICATE_FILE" ]; then
         [ -f "$CERTIFICATE_FILE" ] || { ml_log_error "Certificate file not found"; return 1; }
-        external_security_json=$(jq -n --argjson config "$external_security_json" --rawfile certificate "$CERTIFICATE_FILE" '$config + {"ldap-certificate":$certificate}') || return 1
+        external_security_json=$(printf '%s' "$external_security_json" | jq --rawfile certificate "$CERTIFICATE_FILE" '.["ldap-server"]["ldap-certificate"] = $certificate') || return 1
     fi
 
     # Do not log the JSON: it may contain the LDAP bind password.
@@ -408,6 +417,14 @@ ldap_create_external_security() {
     local external_security_json
     external_security_json=$(ldap_create_external_security_json)
 
+    # MarkLogic answers a duplicate POST with HTTP 400 (not 409), so route --force to the
+    # properties PUT whenever the existence check said the object is already there.
+    if [ "$existence_status" -eq 0 ] && [ "$FORCE" = "true" ]; then
+        ml_log_info "Updating existing external security..."
+        ldap_update_external_security "$external_security_json"
+        return $?
+    fi
+
     # Apply external security to MarkLogic
     local response status_code
     if ml_api_call_with_dryrun response "POST" "/manage/v2/external-security" \
@@ -454,8 +471,10 @@ ldap_update_external_security() {
     security_path=$(ldap_encode_path_segment "$EXTERNAL_SECURITY_NAME") || return 1
 
     local response status_code
-    if ml_api_call_with_dryrun response "PUT" "/manage/v2/external-security/$security_path" \
-        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$external_security_json"; then
+    local update_json
+    update_json=$(printf '%s' "$external_security_json" | jq 'del(.["external-security-name"])') || return 1
+    if ml_api_call_with_dryrun response "PUT" "/manage/v2/external-security/$security_path/properties" \
+        "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$update_json"; then
         status_code=$(ml_extract_status_code "$response")
     else
         case $? in
@@ -1000,8 +1019,10 @@ CREATE-EXTERNAL-SECURITY OPTIONS:
     --bind-username USER          Bind username/DN (required)
     --bind-password PASS          Rejected; use LDAP_BIND_PASSWORD or a hidden prompt
     --ldap-attribute ATTR         User attribute (default: uid)
-    --user-dn-template TEMPLATE   User DN template (e.g., cn={user},ou=users,dc=example,dc=com)
-    --group-dn-template TEMPLATE  Group DN template
+    --authorization MODE          internal (default: map to MarkLogic users via external-name) or ldap (roles from groups)
+    --memberof-attribute ATTR     User attribute listing groups (MarkLogic default: memberOf)
+    --member-attribute ATTR       Group attribute listing members (MarkLogic default: member)
+    --nested-lookup               Also resolve groups of groups
     --start-tls                   Enable StartTLS
     --certificate-file FILE       SSL certificate file
     --client-cert FILE            PEM client certificate MarkLogic presents to the LDAP server (mutual TLS)
@@ -1068,8 +1089,7 @@ EXAMPLES:
         --ldap-base "DC=example,DC=com" \\
         --bind-method simple \\
         --bind-username "CN=svc-marklogic,CN=Users,DC=example,DC=com" \\
-        --ldap-attribute "sAMAccountName" \\
-        --user-dn-template "CN={user},CN=Users,DC=example,DC=com"
+        --ldap-attribute "sAMAccountName"
 
     # Create for OpenLDAP
     $0 create-external-security --name openldap-auth \\
@@ -1136,7 +1156,7 @@ parse_arguments() {
     # Parse remaining arguments including common ones
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --name|--external-security|--ldap-server|--ldap-base|--bind-method|--bind-username|--ldap-attribute|--user-dn-template|--group-dn-template|--certificate-file|--client-cert|--client-key|--ca-file|--appserver|--auth-mode|--test-user|--search-base|--search-filter|--search-scope|--max-results|--marklogic-host|--marklogic-port|--marklogic-user)
+            --name|--external-security|--ldap-server|--ldap-base|--bind-method|--bind-username|--ldap-attribute|--authorization|--memberof-attribute|--member-attribute|--certificate-file|--client-cert|--client-key|--ca-file|--appserver|--auth-mode|--test-user|--search-base|--search-filter|--search-scope|--max-results|--marklogic-host|--marklogic-port|--marklogic-user)
                 if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then ml_log_error "$1 requires a non-empty value"; return 1; fi
                 ;;
         esac
@@ -1174,13 +1194,21 @@ parse_arguments() {
                 LDAP_ATTRIBUTE="$2"
                 shift 2
                 ;;
-            --user-dn-template)
-                USER_DN_TEMPLATE="$2"
+            --authorization)
+                AUTHORIZATION="$2"
                 shift 2
                 ;;
-            --group-dn-template)
-                GROUP_DN_TEMPLATE="$2"
+            --memberof-attribute)
+                MEMBEROF_ATTRIBUTE="$2"
                 shift 2
+                ;;
+            --member-attribute)
+                MEMBER_ATTRIBUTE="$2"
+                shift 2
+                ;;
+            --nested-lookup)
+                NESTED_LOOKUP="true"
+                shift
                 ;;
             --start-tls)
                 START_TLS="true"
