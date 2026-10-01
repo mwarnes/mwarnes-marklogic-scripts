@@ -145,7 +145,7 @@ rotate_ldap_password() {
         return 0
     fi
     secret_file=$(rotate_create_secret_file "$new_password") || return 1
-    if payload=$(jq -n --rawfile credential "$secret_file" '{"ldap-bind-password":$credential}'); then
+    if payload=$(jq -n --rawfile credential "$secret_file" '{"ldap-server":{"ldap-password":$credential}}'); then
         rotate_cleanup_secret_file "$secret_file"
     else
         rotate_cleanup_secret_file "$secret_file"
@@ -161,7 +161,7 @@ rotate_oauth_secret() {
         return 0
     fi
     secret_file=$(rotate_create_secret_file "$new_secret") || return 1
-    if payload=$(jq -n --rawfile credential "$secret_file" '{"oauth-client-secret":$credential}'); then
+    if payload=$(jq -n --rawfile credential "$secret_file" '{"oauth-server":{"oauth-client-secret":$credential}}'); then
         rotate_cleanup_secret_file "$secret_file"
     else
         rotate_cleanup_secret_file "$secret_file"
@@ -177,7 +177,7 @@ rotate_saml_key() {
         return 0
     fi
     [ -f "$new_key_file" ] || { ml_log_error "Key file not found"; return 1; }
-    payload=$(jq -n --rawfile key "$new_key_file" '{"saml-sp-private-key":$key}') || return 1
+    payload=$(jq -n --rawfile key "$new_key_file" '{"saml-server":{"saml-sp-private-key":$key}}') || return 1
     rotate_apply_update "$external_security" "$payload"
 }
 
