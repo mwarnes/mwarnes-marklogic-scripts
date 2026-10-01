@@ -207,7 +207,7 @@ saml_create_external_security_json() {
         metadata_file=$(mktemp) || return 1
         metadata_created=true
         chmod 600 "$metadata_file" || { rm -f "$metadata_file"; return 1; }
-        if ! curl -sS -f --connect-timeout 10 --max-time 30 -o "$metadata_file" "$IDP_METADATA_URL" 2>/dev/null; then
+        if ! curl -sS -f -L --max-redirs 3 --connect-timeout 10 --max-time 30 -o "$metadata_file" "$IDP_METADATA_URL" 2>/dev/null; then
             rm -f "$metadata_file"
             ml_log_error "Failed to download IdP metadata"
             return 1
@@ -387,7 +387,7 @@ saml_delete_external_security() {
         ml_log_warning "SAML deletion cancelled"
         return 1
     fi
-    saml_backup_resource "/manage/v2/external-security/$name_path" "SAML external-security '$EXTERNAL_SECURITY_NAME'" || return 1
+    saml_backup_resource "/manage/v2/external-security/$name_path/properties?format=json" "SAML external-security '$EXTERNAL_SECURITY_NAME'" || return 1
 
     # Delete only the confirmed, backed-up exact target.
     local response status_code
@@ -432,7 +432,7 @@ saml_update_external_security() {
         ml_log_warning "SAML update cancelled"
         return 1
     fi
-    saml_backup_resource "/manage/v2/external-security/$name_path" "SAML external-security '$EXTERNAL_SECURITY_NAME'" || return 1
+    saml_backup_resource "/manage/v2/external-security/$name_path/properties?format=json" "SAML external-security '$EXTERNAL_SECURITY_NAME'" || return 1
     if ml_api_call_with_dryrun response "PUT" "/manage/v2/external-security/$name_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$external_security_json"; then
         status_code=$(ml_extract_status_code "$response")
     else
@@ -491,7 +491,7 @@ saml_configure_appserver() {
     local group_id="${APPSERVER_GROUP:-Default}" appserver_path group_path
     appserver_path=$(saml_api_path_segment "$APPSERVER_NAME") || { ml_log_error "Invalid app-server name"; return 1; }
     group_path=$(saml_api_path_segment "$group_id") || { ml_log_error "Invalid app-server group"; return 1; }
-    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties?group-id=$group_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
+    if ml_api_call_with_dryrun response "GET" "/manage/v2/servers/$appserver_path/properties?group-id=$group_path&format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
         status_code=$(ml_extract_status_code "$response")
     else
         case $? in
@@ -598,7 +598,7 @@ saml_import_idp_metadata() {
     local temp_metadata
     temp_metadata=$(mktemp) || return 1
     chmod 600 "$temp_metadata" || { rm -f "$temp_metadata"; return 1; }
-    if ! curl -sS -f --connect-timeout 10 --max-time 30 -o "$temp_metadata" "$IDP_METADATA_URL" 2>/dev/null; then
+    if ! curl -sS -f -L --max-redirs 3 --connect-timeout 10 --max-time 30 -o "$temp_metadata" "$IDP_METADATA_URL" 2>/dev/null; then
         rm -f "$temp_metadata"
         ml_log_error "Failed to download IdP metadata"
         return 1
@@ -649,7 +649,7 @@ saml_generate_sp_metadata() {
 
     # Load the exact configuration through a path-encoded, read-only request.
     local response status_code
-    if ml_api_call_with_dryrun response "GET" "/manage/v2/external-security/$name_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
+    if ml_api_call_with_dryrun response "GET" "/manage/v2/external-security/$name_path/properties?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
         status_code=$(ml_extract_status_code "$response")
     else
         case $? in
@@ -777,7 +777,7 @@ saml_show_idp_info() {
     esac
 
     local response status_code
-    if ml_api_call_with_dryrun response "GET" "/manage/v2/external-security/$name_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
+    if ml_api_call_with_dryrun response "GET" "/manage/v2/external-security/$name_path/properties?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then
         status_code=$(ml_extract_status_code "$response")
     else
         case $? in
@@ -1008,15 +1008,15 @@ saml_validate_assertion() {
     # Extract key information
     local subject issuer
     if command -v xmllint >/dev/null 2>&1; then
-        subject=$(xmllint --nonet --xpath "//saml:Subject/saml:NameID/text()" "$ASSERTION_FILE" 2>/dev/null || true)
-        issuer=$(xmllint --nonet --xpath "//saml:Issuer/text()" "$ASSERTION_FILE" 2>/dev/null || true)
+        subject=$(xmllint --nonet --xpath "//*[local-name()='Subject']/*[local-name()='NameID']/text()" "$ASSERTION_FILE" 2>/dev/null || true)
+        issuer=$(xmllint --nonet --xpath "string(//*[local-name()='Issuer'][1])" "$ASSERTION_FILE" 2>/dev/null || true)
 
         [ -z "$subject" ] || echo "Subject (NameID): present (value omitted)"
         [ -z "$issuer" ] || echo "Issuer: present (value omitted)"
 
         # Check for attributes
         local attr_count
-        attr_count=$(xmllint --nonet --xpath "count(//saml:AttributeStatement/saml:Attribute)" "$ASSERTION_FILE" 2>/dev/null || echo "0")
+        attr_count=$(xmllint --nonet --xpath "count(//*[local-name()='AttributeStatement']/*[local-name()='Attribute'])" "$ASSERTION_FILE" 2>/dev/null || echo "0")
         echo "Attribute Count: $attr_count"
 
         if [ "$attr_count" -gt 0 ]; then

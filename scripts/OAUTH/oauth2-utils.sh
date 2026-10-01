@@ -182,7 +182,7 @@ oauth2_http_get() {
     if [ "${DRY_RUN:-false}" = "true" ]; then oauth2_log_info "DRY_RUN: Would GET the configured endpoint"; return 3; fi
     oauth2_log_debug "HTTP GET to configured endpoint"
 
-    local -a curl_args=(curl -sS -f --connect-timeout "$timeout" --max-time "$timeout")
+    local -a curl_args=(curl -sS -f -L --max-redirs 3 --proto-redir =http,https --connect-timeout "$timeout" --max-time "$timeout")
     local curl_flag header_file="" response status
     curl_flag=$(oauth2_curl_extra_flags "$extra_flags") || return 1
     [ -z "$curl_flag" ] || curl_args+=("$curl_flag")
