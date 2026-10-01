@@ -11,17 +11,33 @@
 # 4. Follow SAML response back to MarkLogic
 # 5. Access protected resource with SAML session
 #
-# Usage: ./test-saml-flow.sh
+# Usage:
+#   MARKLOGIC_URL=https://ml.example.com:8000/ KEYCLOAK_BASE=https://keycloak.example.com:8443 \
+#   TEST_USER=alice TEST_PASS='...' ./test-saml-flow.sh
+#
+# Keycloak only: step 3 posts Keycloak's login form. For other IdPs (e.g. authentik)
+# the login is not a plain HTML form, so this script stops at step 2 with
+# "Keycloak login form not found". Add -k via CURL_OPTS=-k only for self-signed lab hosts.
+# NOT tested against a live Keycloak in the QA run; the SAML redirect (step 1) was
+# verified against authentik.
 # ================================================================
 
 set -euo pipefail
 
-# Configuration
-MARKLOGIC_URL="http://oauth.warnesnet.com:9002/manage"
-KEYCLOAK_BASE="https://oauth.warnesnet.com:8443"
-TEST_USER="martin"
-TEST_PASS="L1tespeed1!?kc"
-COOKIE_JAR="/tmp/saml-test-cookies.txt"
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//' | grep -v '^=*$'
+    exit 0
+fi
+
+# Configuration (environment variables; no defaults for credentials)
+MARKLOGIC_URL="${MARKLOGIC_URL:?Set MARKLOGIC_URL to a SAML-protected MarkLogic URL}"
+KEYCLOAK_BASE="${KEYCLOAK_BASE:?Set KEYCLOAK_BASE, e.g. https://keycloak.example.com:8443}"
+TEST_USER="${TEST_USER:?Set TEST_USER}"
+TEST_PASS="${TEST_PASS:?Set TEST_PASS (a test account; do not use a real user)}"
+CURL_OPTS="${CURL_OPTS:-}"
+WORKDIR="$(mktemp -d)"; chmod 700 "$WORKDIR"
+COOKIE_JAR="$WORKDIR/cookies.txt"
+trap 'rm -rf "$WORKDIR"' EXIT   # responses contain login pages; removed on exit
 
 # Colors for output
 RED='\033[0;31m'
@@ -46,9 +62,6 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Clean up previous cookies
-rm -f "$COOKIE_JAR"
-
 echo "========================================"
 echo "SAML Authentication Flow Test"
 echo "========================================"
@@ -58,8 +71,8 @@ log_info "Step 1: Accessing protected MarkLogic resource..."
 log_info "URL: $MARKLOGIC_URL"
 
 # Step 1: Access protected resource and capture redirect
-RESPONSE=$(curl -i -s -k -c "$COOKIE_JAR" -L "$MARKLOGIC_URL" 2>/dev/null)
-echo "$RESPONSE" > /tmp/step1-response.txt
+RESPONSE=$(curl -i -s $CURL_OPTS -c "$COOKIE_JAR" -L "$MARKLOGIC_URL" 2>/dev/null)
+echo "$RESPONSE" > $WORKDIR/step1-response.txt
 
 # Check if we get SAML redirect
 if echo "$RESPONSE" | grep -q "Location.*saml"; then
@@ -77,8 +90,8 @@ echo
 log_info "Step 2: Following SAML redirect to Keycloak..."
 
 # Step 2: Follow SAML redirect to get Keycloak login form
-KEYCLOAK_RESPONSE=$(curl -i -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L "$SAML_URL" 2>/dev/null)
-echo "$KEYCLOAK_RESPONSE" > /tmp/step2-response.txt
+KEYCLOAK_RESPONSE=$(curl -i -s $CURL_OPTS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L "$SAML_URL" 2>/dev/null)
+echo "$KEYCLOAK_RESPONSE" > $WORKDIR/step2-response.txt
 
 # Extract login form details
 if echo "$KEYCLOAK_RESPONSE" | grep -q "form.*action"; then
@@ -104,12 +117,12 @@ log_info "Username: $TEST_USER"
 log_info "Password: [hidden]"
 
 # Step 3: Submit login credentials
-LOGIN_RESPONSE=$(curl -i -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L \
+LOGIN_RESPONSE=$(curl -i -s $CURL_OPTS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L \
     --data-urlencode "username=$TEST_USER" \
     --data-urlencode "password=$TEST_PASS" \
     --data-urlencode "credentialId=" \
     "$LOGIN_ACTION" 2>/dev/null)
-echo "$LOGIN_RESPONSE" > /tmp/step3-response.txt
+echo "$LOGIN_RESPONSE" > $WORKDIR/step3-response.txt
 
 # Check if login was successful and we get SAML response
 if echo "$LOGIN_RESPONSE" | grep -q "SAMLResponse\|Location.*oauth.warnesnet.com"; then
@@ -137,8 +150,8 @@ echo
 log_info "Step 4: Attempting to access MarkLogic with SAML session..."
 
 # Step 4: Try to access MarkLogic resource again with session
-FINAL_RESPONSE=$(curl -i -s -k -b "$COOKIE_JAR" -L "$MARKLOGIC_URL" 2>/dev/null)
-echo "$FINAL_RESPONSE" > /tmp/step4-response.txt
+FINAL_RESPONSE=$(curl -i -s $CURL_OPTS -b "$COOKIE_JAR" -L "$MARKLOGIC_URL" 2>/dev/null)
+echo "$FINAL_RESPONSE" > $WORKDIR/step4-response.txt
 
 # Check if we can now access the protected resource
 if echo "$FINAL_RESPONSE" | grep -q "HTTP/1.1 200\|MarkLogic.*Admin\|Management Console"; then
@@ -167,12 +180,3 @@ else
 fi
 
 echo
-log_info "Response files saved to /tmp/ for debugging:"
-log_info "- /tmp/step1-response.txt (initial redirect)"
-log_info "- /tmp/step2-response.txt (Keycloak form)"
-log_info "- /tmp/step3-response.txt (login response)"
-log_info "- /tmp/step4-response.txt (final access attempt)"
-log_info "- $COOKIE_JAR (session cookies)"
-
-# Clean up
-rm -f "$COOKIE_JAR"
