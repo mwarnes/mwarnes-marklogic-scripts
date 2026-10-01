@@ -183,6 +183,7 @@ ml_test_connectivity() {
 
     local curl_flags
     curl_flags=$(ml_get_curl_flags)
+    # shellcheck disable=SC2086  # curl_flags is a space-separated flag list
     response=$(curl -s -w "%{http_code}" $curl_flags "$test_url" 2>/dev/null)
     status_code="${response: -3}"
 
@@ -280,6 +281,7 @@ ml_api_request() {
         chmod 600 "$temp_data"
         printf '%s' "$data" > "$temp_data"
 
+        # shellcheck disable=SC2086  # curl_flags is a space-separated flag list
         response=$(curl -s -w "%{http_code}" --anyauth \
             --config "$temp_creds" \
             $curl_flags \
@@ -289,6 +291,7 @@ ml_api_request() {
             "$url" 2>/dev/null)
         curl_exit=$?
     else
+        # shellcheck disable=SC2086  # curl_flags is a space-separated flag list
         response=$(curl -s -w "%{http_code}" --anyauth \
             --config "$temp_creds" \
             $curl_flags \
@@ -386,6 +389,7 @@ ml_create_temp_file() {
     temp_file=$(mktemp)
 
     # Register cleanup on exit
+    # shellcheck disable=SC2064  # expand now on purpose: $temp_file is local to this function
     trap "rm -f '$temp_file'" EXIT
 
     echo "$temp_file"

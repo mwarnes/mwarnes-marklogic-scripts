@@ -223,7 +223,6 @@ main() {
     oauth2_validate_url "$MARKLOGIC_HOST" || exit 1
     authority="${MARKLOGIC_HOST#*://}"
     case "$authority" in */) MARKLOGIC_HOST="${MARKLOGIC_HOST%/}" ;; */*) ml_log_error "MarkLogic host must not include a path"; exit 1 ;; esac
-    MARKLOGIC_PORT="$MARKLOGIC_PORT"
     ml_parse_host_url "$MARKLOGIC_HOST"
     [[ -n "$ML_HOST" && "$ML_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { ml_log_error "Invalid MarkLogic host"; exit 1; }
     [[ "$ML_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$ML_PORT" -ge 1 ] && [ "$ML_PORT" -le 65535 ] || { ml_log_error "Invalid MarkLogic port"; exit 1; }

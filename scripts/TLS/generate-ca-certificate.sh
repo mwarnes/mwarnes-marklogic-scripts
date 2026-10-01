@@ -276,10 +276,6 @@ parse_arguments() {
                 YES="true"
                 shift
                 ;;
-            --yes)
-                YES="true"
-                shift
-                ;;
             --help)
                 show_usage
                 exit 0

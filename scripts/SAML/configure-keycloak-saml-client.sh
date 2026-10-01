@@ -107,7 +107,7 @@ if [ -n "$existing_id" ]; then
     client_path=$(oauth2_api_path_segment "$existing_id") || exit 1
     client_url="$clients_url/$client_path"
     previous=$(oauth2_http_get "$client_url" 30 "$auth_header" "$curl_flags") || { oauth2_log_error "Could not export the current Keycloak client; refusing update"; exit 1; }
-    [ -d "$BACKUP_DIR" ] || mkdir -m 700 -p "$BACKUP_DIR"
+    [ -d "$BACKUP_DIR" ] || { umask 077; mkdir -p "$BACKUP_DIR"; }
     [ ! -L "$BACKUP_DIR" ] || { oauth2_log_error "Backup directory must not be a symlink"; exit 1; }
     chmod 700 "$BACKUP_DIR" || exit 1
     [[ -O "$BACKUP_DIR" ]] || { oauth2_log_error "Backup directory must be owned by the current user"; exit 1; }

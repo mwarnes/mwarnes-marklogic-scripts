@@ -23,6 +23,7 @@
 # ================================================================
 
 set -euo pipefail
+# shellcheck disable=SC2086  # CURL_OPTS is an intentional space-separated flag list
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//' | grep -v '^=*$'

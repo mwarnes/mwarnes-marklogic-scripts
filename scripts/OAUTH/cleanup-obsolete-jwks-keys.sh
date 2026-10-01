@@ -438,13 +438,13 @@ display_summary() {
     echo "🗑️  Obsolete keys: $OBSOLETE_COUNT"
     echo ""
     
-    if [ $MISSING_COUNT -gt 0 ]; then
+    if [ "$MISSING_COUNT" -gt 0 ]; then
         echo "📝 Next Actions:"
         echo "   1. Review new keys with scripts/extract-jwks-keys.sh; no automatic upload is provided"
         echo ""
     fi
     
-    if [ $OBSOLETE_COUNT -gt 0 ] && [ "$DELETE_KEYS" = false ]; then
+    if [ "$OBSOLETE_COUNT" -gt 0 ] && [ "$DELETE_KEYS" = false ]; then
         echo "🧹 Cleanup Options:"
         echo "   1. Review obsolete keys before deletion"
         echo "   2. Ensure no applications are using old tokens signed with these keys"
@@ -453,7 +453,7 @@ display_summary() {
         echo "      $0 $JWKS_URL --delete-keys"
         echo ""
         echo "⚠️  IMPORTANT: Only delete keys if you're certain they're no longer needed!"
-    elif [ $OBSOLETE_COUNT -eq 0 ]; then
+    elif [ "$OBSOLETE_COUNT" -eq 0 ]; then
         echo "✅ No cleanup needed - all keys are current"
     fi
 }

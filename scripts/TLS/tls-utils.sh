@@ -494,7 +494,7 @@ tls_get_ssl_connection_info() {
                 # Extract this certificate
                 local cert_start_line cert_end_line cert_content
                 cert_start_line=$(grep -n "BEGIN CERTIFICATE" "$temp_file" | sed -n "${cert_num}p" | cut -d':' -f1)
-                cert_end_line=$(tail -n +$cert_start_line "$temp_file" | grep -n "END CERTIFICATE" | head -1 | cut -d':' -f1)
+                cert_end_line=$(tail -n +"$cert_start_line" "$temp_file" | grep -n "END CERTIFICATE" | head -1 | cut -d':' -f1)
                 cert_end_line=$((cert_start_line + cert_end_line - 1))
 
                 cert_content=$(sed -n "${cert_start_line},${cert_end_line}p" "$temp_file")

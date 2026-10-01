@@ -57,7 +57,7 @@ show_usage() {
     echo "  # Use environment variables for sensitive data"
     echo "  $0 https://your-idp.example.com/jwks --upload-to-marklogic \\"
     echo "     --marklogic-user \"\$ML_USER\" --marklogic-pass \"\$ML_PASS\""
-    exit 1
+    exit "${1:-1}"
 }
 
 # Initialize variables with defaults
@@ -127,7 +127,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            show_usage
+            show_usage 0
             ;;
         --*)
             echo "Error: Unknown option $1"
@@ -271,7 +271,7 @@ upload_keys_to_marklogic() {
     for i in "${!KEY_DATA[@]}"; do
         echo "      ${KEY_DATA[$i]}" >> "$PAYLOAD_FILE"
         # Add comma if not the last element
-        if [ $i -lt $((${#KEY_DATA[@]} - 1)) ]; then
+        if [ "$i" -lt $((${#KEY_DATA[@]} - 1)) ]; then
             echo "," >> "$PAYLOAD_FILE"
         else
             echo "" >> "$PAYLOAD_FILE"
@@ -490,7 +490,7 @@ except Exception as e:
     fi
 
     # Add blank line between keys (except for last key)
-    if [ $i -lt $((KEY_COUNT - 1)) ]; then
+    if [ "$i" -lt $((KEY_COUNT - 1)) ]; then
         echo ""
     fi
 done

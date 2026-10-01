@@ -714,7 +714,7 @@ oauth2_wait_for_service() {
     oauth2_log_info "Waiting for service at $host:$port..."
     
     local attempt=1
-    while [ $attempt -le $max_attempts ]; do
+    while [ "$attempt" -le "$max_attempts" ]; do
         if oauth2_check_port "$host" "$port"; then
             oauth2_log_success "Service is available at $host:$port"
             return 0

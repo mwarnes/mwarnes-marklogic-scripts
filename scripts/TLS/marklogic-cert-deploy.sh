@@ -176,7 +176,7 @@ fi
 
 # Preserve an exact protected pre-change export for manual recovery.
 if [[ -L "$ML_BACKUP_DIR" ]]; then fail "Backup directory must not be a symlink."; fi
-if [[ ! -d "$ML_BACKUP_DIR" ]]; then mkdir -p -m 700 "$ML_BACKUP_DIR" || fail "Could not create backup directory."; fi
+if [[ ! -d "$ML_BACKUP_DIR" ]]; then (umask 077; mkdir -p "$ML_BACKUP_DIR") || fail "Could not create backup directory."; fi
 chmod 700 "$ML_BACKUP_DIR" || fail "Could not secure backup directory."
 [[ -O "$ML_BACKUP_DIR" ]] || fail "Backup directory must be owned by the deploy-hook user."
 BACKUP_FILE=$(mktemp "$ML_BACKUP_DIR/template-${ML_CERT_TEMPLATE}.XXXXXX") || fail "Could not create a protected backup file."
