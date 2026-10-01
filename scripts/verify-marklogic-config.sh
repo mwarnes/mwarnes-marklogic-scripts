@@ -307,25 +307,33 @@ verify_saml_config() {
         
         local config_path response status_code response_body
         config_path=$(api_path_segment "$config_name") || return 1
-        response=$(ml_api_request GET "/manage/v2/external-security/$config_path?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") || return 1
+        response=$(ml_api_request GET "/manage/v2/external-security/$config_path/properties?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") || return 1
         status_code=$(ml_extract_status_code "$response")
         response_body=$(ml_extract_response_body "$response")
         
         if [ "$status_code" = "200" ]; then
             # Check SAML specific fields
-            local auth_type saml_settings
+            local auth_type
             auth_type=$(echo "$response_body" | jq -r '.authentication // "not set"' 2>/dev/null)
             
             if [ "$auth_type" = "saml" ]; then
                 log_success "Configuration is properly set for SAML authentication"
                 
-                # Extract SAML details
-                local entity_id idp_metadata
-                entity_id=$(echo "$response_body" | jq -r '.["saml-config"]["entity-id"] // "not set"' 2>/dev/null)
-                idp_metadata=$(echo "$response_body" | jq -r '.["saml-config"]["idp-metadata"] // "not set"' 2>/dev/null)
-                
-                log_info "SAML Entity ID: $entity_id"
-                log_info "IdP Metadata: $(echo "$idp_metadata" | cut -c1-100)..."
+                # saml-issuer is the SP entity ID MarkLogic sends; saml-entity-id / saml-destination describe the IdP.
+                # Certificates and keys are reported as present/absent only.
+                local issuer idp_entity destination idp_cert sp_cert
+                issuer=$(echo "$response_body" | jq -r '.["saml-server"]["saml-issuer"] // "not set"' 2>/dev/null)
+                idp_entity=$(echo "$response_body" | jq -r '.["saml-server"]["saml-entity-id"] // "not set"' 2>/dev/null)
+                destination=$(echo "$response_body" | jq -r '.["saml-server"]["saml-destination"] // "not set"' 2>/dev/null)
+                idp_cert=$(echo "$response_body" | jq -r 'if (.["saml-server"]["saml-idp-certificate-authority"] // "") != "" then "present" else "MISSING" end' 2>/dev/null)
+                sp_cert=$(echo "$response_body" | jq -r 'if (.["saml-server"]["saml-sp-certificate"] // "") != "" then "present" else "not set (AuthnRequests unsigned)" end' 2>/dev/null)
+
+                log_info "SP entity ID (saml-issuer): $issuer"
+                log_info "IdP entity ID (saml-entity-id): $idp_entity"
+                log_info "IdP SSO URL (saml-destination): $destination"
+                log_info "IdP signing certificate: $idp_cert"
+                log_info "SP certificate: $sp_cert"
+                [ "$idp_cert" = "present" ] || { log_warning "No IdP certificate: MarkLogic cannot validate assertion signatures"; return 1; }
                 
                 return 0
             else
