@@ -21,6 +21,8 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 
 ## QA status
 
+> **⚠️ Kerberos scripts (`scripts/Kerberos/`): use at your own risk.** They have not been tested on current MarkLogic 11 or 12 releases and are provided as-is. See the table below.
+
 | Area | Status |
 |------|--------|
 | `TLS/configure-marklogic-tls.sh`, `generate-ca-certificate.sh`, `generate-csr.sh`, `validate-tls.sh`, `validate-certificate-type.sh` | Tested against MarkLogic 12.1, including both certificate-import routes (MarkLogic-generated CSR and external key pair) and CA-verified TLS handshakes |
@@ -29,7 +31,7 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 | `TLS/example-end-to-end-tls.sh`, `TLS/example-marklogic-client-auth.sh` | Tested |
 | `security-audit.sh`, `verify-marklogic-config.sh` | Tested against MarkLogic 12.1 (TLS/app-server checks) |
 | `LDAP/configure-marklogic-ldap.sh` | Tested against MarkLogic 12.1 and a 389 Directory Server: create (simple bind over ldap/ldaps/StartTLS, authorization internal or ldap, mutual TLS with a client certificate), update with `--force`, configure app server, validate, test, search, schema, delete, and `whoami` (client-certificate mapping check). Active Directory behaviour is documented from Microsoft's documentation and not run |
-| `Kerberos/` | Syntax and option checks only; no KDC available. Known issue: `configure-marklogic-kerberos.sh configure-appserver` sends `negotiate`/`basic+negotiate`, which MarkLogic 12 rejects (valid value is `kerberos-ticket`, which also requires internal security to be disabled) |
+| `Kerberos/` | **Use at your own risk: not tested on MarkLogic 11 or 12** (no Kerberos environment available; only syntax and option checks were run). Known problem: `configure-marklogic-kerberos.sh configure-appserver` sends `negotiate` / `basic+negotiate`, which MarkLogic 12 rejects (`XDMP-VALIDATEBADTYPE`); the 12.1 value is `kerberos-ticket`, which also requires internal security to be disabled on the app server |
 | `OAUTH/`, `SAML/`, `rotate-credentials.sh`, and the OAuth/SAML paths of `configure-appserver-security.sh` | **Not yet QA-tested** (no identity-provider test servers available). Review before use. |
 
 Requires `bash`, `curl`, `jq` and `openssl`. The scripts run on macOS (bash 3.2) and Linux.

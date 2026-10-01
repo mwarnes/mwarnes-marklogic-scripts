@@ -1,6 +1,18 @@
 #!/bin/bash
 
 # ================================================================
+# WARNING: USE AT YOUR OWN RISK - UNTESTED ON MARKLOGIC 11 AND 12
+# ================================================================
+# No Kerberos environment was available to test this script. It has not
+# been run against current MarkLogic 11 or 12 releases and is provided
+# as-is. Known problem: "configure-appserver" sends "negotiate" or
+# "basic+negotiate" as the app-server authentication value, which
+# MarkLogic 12 rejects (XDMP-VALIDATEBADTYPE). The 12.1 value is
+# "kerberos-ticket", and MarkLogic refuses it unless internal security
+# is disabled on the app server. Test on a disposable system first.
+# ================================================================
+
+# ================================================================
 # MarkLogic Kerberos Authentication Configuration Script
 # ================================================================
 #
@@ -749,6 +761,10 @@ show_usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 MarkLogic Kerberos Authentication Configuration Script
+
+WARNING: USE AT YOUR OWN RISK. This script has NOT been tested on MarkLogic 11 or 12.
+  Known problem: configure-appserver sends "negotiate"/"basic+negotiate", which MarkLogic 12
+  rejects; the 12.1 value is "kerberos-ticket" (and needs internal security disabled).
 
 COMMANDS:
     create-external-security    Create Kerberos external security
