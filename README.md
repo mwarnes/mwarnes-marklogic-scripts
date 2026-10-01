@@ -28,7 +28,9 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 | `TLS/setup-certbot-route53.sh`, `TLS/marklogic-cert-deploy*.sh` | Tested on Amazon Linux 2023 with a real Let's Encrypt lineage deployed into a MarkLogic template (the Route 53 issuance itself is not exercised) |
 | `TLS/example-end-to-end-tls.sh`, `TLS/example-marklogic-client-auth.sh` | Tested |
 | `security-audit.sh`, `verify-marklogic-config.sh` | Tested against MarkLogic 12.1 (TLS/app-server checks) |
-| `OAUTH/`, `SAML/`, `LDAP/`, `Kerberos/`, `rotate-credentials.sh`, and the OAuth/SAML/LDAP/Kerberos paths of `configure-appserver-security.sh` | **Not yet QA-tested** (no identity-provider test servers available). Review before use. Known issue: `configure-appserver-security.sh --authentication-method ldap\|kerberos` sends values MarkLogic rejects; LDAP is `basic` plus an external-security object. |
+| `LDAP/configure-marklogic-ldap.sh` | Tested against MarkLogic 12.1 and a 389 Directory Server: create (simple bind over ldap/ldaps/StartTLS, authorization internal or ldap, mutual TLS with a client certificate), update with `--force`, configure app server, validate, test, search, schema, delete, and `whoami` (client-certificate mapping check). Active Directory behaviour is documented from Microsoft's documentation and not run |
+| `Kerberos/` | Syntax and option checks only; no KDC available. Known issue: `configure-marklogic-kerberos.sh configure-appserver` sends `negotiate`/`basic+negotiate`, which MarkLogic 12 rejects (valid value is `kerberos-ticket`, which also requires internal security to be disabled) |
+| `OAUTH/`, `SAML/`, `rotate-credentials.sh`, and the OAuth/SAML paths of `configure-appserver-security.sh` | **Not yet QA-tested** (no identity-provider test servers available). Review before use. |
 
 Requires `bash`, `curl`, `jq` and `openssl`. The scripts run on macOS (bash 3.2) and Linux.
 
