@@ -501,13 +501,13 @@ test_marklogic_configuration() {
         local app_server_path server_response
         app_server_path=$(oauth2_api_path_segment "$APP_SERVER") || { log_test_fail "Invalid app-server name"; return 1; }
         
-        if server_response=$(ml_api_request GET "/manage/v2/servers/$app_server_path?group-id=Default" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$server_response")" = "200" ]; then
+        if server_response=$(ml_api_request GET "/manage/v2/servers/$app_server_path?group-id=Default&format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$server_response")" = "200" ]; then
         log_test_pass "App server '$APP_SERVER' exists"
         
         # Get detailed properties to find port and authentication settings
         local properties_response
         
-        if properties_response=$(ml_api_request GET "/manage/v2/servers/$app_server_path/properties?group-id=Default" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$properties_response")" = "200" ]; then
+        if properties_response=$(ml_api_request GET "/manage/v2/servers/$app_server_path/properties?group-id=Default&format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$properties_response")" = "200" ]; then
             properties_response=$(ml_extract_response_body "$properties_response")
             # Get the actual port from the properties
             MARKLOGIC_API_PORT=$(echo "$properties_response" | jq -r '.port // "unknown"')
@@ -523,7 +523,7 @@ test_marklogic_configuration() {
                 # Check if OAuth is configured
                 local auth_method external_auth
                 auth_method=$(echo "$properties_response" | jq -r '.authentication // "unknown"')
-                external_auth=$(echo "$properties_response" | jq -r '.["external-security"] // "none"')
+                external_auth=$(echo "$properties_response" | jq -r '(.["external-security"] // "none") | if type == "array" then (.[0] // "none") else . end')
                 
                 oauth2_log_info "App server authentication: $auth_method"
                 oauth2_log_info "External security: $external_auth"
@@ -548,11 +548,11 @@ test_marklogic_configuration() {
                                 local config_path config_response
                                 config_path=$(oauth2_api_path_segment "$config_name") || { log_test_fail "Invalid external-security name"; return 1; }
                                 
-                                if config_response=$(ml_api_request GET "/manage/v2/external-security/$config_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$config_response")" = "200" ]; then
+                                if config_response=$(ml_api_request GET "/manage/v2/external-security/$config_path/properties?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS") && [ "$(ml_extract_status_code "$config_response")" = "200" ]; then
                                     config_response=$(ml_extract_response_body "$config_response")
                                     local ext_auth_method cache_timeout
-                                    ext_auth_method=$(echo "$config_response" | jq -r '.["external-security-config"] | .authentication // "unknown"')
-                                    cache_timeout=$(echo "$config_response" | jq -r '.["external-security-config"] | .["cache-timeout"] // "unknown"')
+                                    ext_auth_method=$(echo "$config_response" | jq -r '(.["external-security-default"] // .["external-security-config"] // .) | .authentication // "unknown"')
+                                    cache_timeout=$(echo "$config_response" | jq -r '(.["external-security-default"] // .["external-security-config"] // .) | .["cache-timeout"] // "unknown"')
                                     
                                     oauth2_log_info "Authentication method: $ext_auth_method"
                                     oauth2_log_info "Cache timeout: $cache_timeout seconds"
@@ -880,15 +880,14 @@ test_security_validation() {
     # Test JWT algorithm
     if [ -n "${TEST_ACCESS_TOKEN:-}" ]; then
         local alg
-        alg=$(oauth2_jwt_get_claim "$TEST_ACCESS_TOKEN" "alg" 2>/dev/null) || {
-            local header
-            header=$(oauth2_jwt_decode_header "$TEST_ACCESS_TOKEN")
-            alg=$(echo "$header" | jq -r '.alg // "unknown"')
-        }
-        
+        alg=$(oauth2_jwt_decode_header "$TEST_ACCESS_TOKEN" | jq -r '.alg // "unknown"' 2>/dev/null) || alg="unknown"
+
         case "$alg" in
-            "RS256"|"RS384"|"RS512"|"ES256"|"ES384"|"ES512")
-                log_test_pass "JWT uses secure signing algorithm: $alg"
+            "RS256")
+                log_test_pass "JWT is signed with RS256, the algorithm MarkLogic's JWKS validation supports"
+                ;;
+            "RS384"|"RS512"|"ES256"|"ES384"|"ES512")
+                log_test_warning "JWT uses $alg. MarkLogic 12.1 external security accepts only RS256 (ES256 and the others are rejected at configuration time); set the provider's signing key to an RSA key"
                 ;;
             "HS256"|"HS384"|"HS512")
                 log_test_warning "JWT uses HMAC algorithm: $alg (RSA/ECDSA preferred)"
@@ -1006,16 +1005,16 @@ generate_report() {
     
     # Test summary
     local success_rate
-    if [ $TOTAL_TESTS -gt 0 ]; then
-        success_rate=$((PASSED_TESTS * 100 / TOTAL_TESTS))
+    if [ $((PASSED_TESTS + FAILED_TESTS)) -gt 0 ]; then
+        success_rate=$((PASSED_TESTS * 100 / (PASSED_TESTS + FAILED_TESTS)))
     else
         success_rate=0
     fi
     
     oauth2_log_info "📊 Test Summary:"
-    oauth2_log_info "   Total Tests: $TOTAL_TESTS"
-    oauth2_log_info "   Passed: $PASSED_TESTS"
-    oauth2_log_info "   Failed: $FAILED_TESTS"
+    oauth2_log_info "   Test sections: $TOTAL_TESTS"
+    oauth2_log_info "   Checks passed: $PASSED_TESTS"
+    oauth2_log_info "   Checks failed: $FAILED_TESTS"
     oauth2_log_info "   Warnings: $WARNINGS"
     oauth2_log_info "   Success Rate: $success_rate%"
     echo

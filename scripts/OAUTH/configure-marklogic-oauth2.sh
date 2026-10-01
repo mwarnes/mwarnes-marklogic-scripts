@@ -262,7 +262,7 @@ test_marklogic_connection() {
         return 0
     fi
     local response status_code
-    if ! response=$(ml_api_request GET "/" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"); then
+    if ! response=$(ml_api_request GET "/manage/v2" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"); then
         log_error "Cannot connect to MarkLogic at $test_url"
         return 1
     fi
