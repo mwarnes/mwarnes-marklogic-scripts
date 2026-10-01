@@ -32,13 +32,14 @@ show_usage() {
     echo "  <JWKS_ENDPOINT_URL>        The HTTPS/HTTP URL of the JWKS endpoint"
     echo ""
     echo "Flags:"
-    echo "  --upload-to-marklogic      Upload new keys to MarkLogic (default: analysis only)"
+    echo "  --upload-to-marklogic      Upload new keys to MarkLogic (default: analysis only)
+  --insecure                 Skip TLS verification of the JWKS endpoint (self-signed IdP; not recommended)"
     echo ""
     echo "MarkLogic Configuration Options:"
     echo "  --marklogic-host HOST      MarkLogic server hostname (default: $DEFAULT_MARKLOGIC_HOST)"
     echo "  --marklogic-port PORT      MarkLogic Management API port (default: $DEFAULT_MARKLOGIC_PORT)"
     echo "  --marklogic-user USER      MarkLogic admin username (default: $DEFAULT_MARKLOGIC_USER)"
-    echo "  --marklogic-pass PASS      MarkLogic admin password (default: $DEFAULT_MARKLOGIC_PASS)"
+    echo "  --marklogic-pass PASS      MarkLogic admin password (default: $MARKLOGIC_PASS environment variable, else placeholder)"
     echo "  --external-security NAME   External Security profile name (default: $DEFAULT_EXTERNAL_SECURITY_NAME)"
     echo ""
     echo "Examples:"
@@ -65,8 +66,9 @@ UPLOAD_TO_MARKLOGIC=false
 MARKLOGIC_HOST="$DEFAULT_MARKLOGIC_HOST"
 MARKLOGIC_PORT="$DEFAULT_MARKLOGIC_PORT"
 MARKLOGIC_USER="$DEFAULT_MARKLOGIC_USER"
-MARKLOGIC_PASS="$DEFAULT_MARKLOGIC_PASS"
+MARKLOGIC_PASS="${MARKLOGIC_PASS:-$DEFAULT_MARKLOGIC_PASS}"  # environment variable preferred over --marklogic-pass (argv is visible in ps)
 EXTERNAL_SECURITY_NAME="$DEFAULT_EXTERNAL_SECURITY_NAME"
+INSECURE_CURL=()
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -118,6 +120,11 @@ while [[ $# -gt 0 ]]; do
             fi
             EXTERNAL_SECURITY_NAME="$2"
             shift 2
+            ;;
+        --insecure)
+            INSECURE_CURL=(-k)
+            echo "Warning: TLS verification disabled for the JWKS fetch" >&2
+            shift
             ;;
         --help|-h)
             show_usage
@@ -244,16 +251,16 @@ key_exists_in_marklogic() {
 upload_keys_to_marklogic() {
     if [ ${#KEY_DATA[@]} -eq 0 ]; then
         echo ""
-        echo "❌ No new RSA keys found to upload to MarkLogic."
-        echo "   All keys may already exist in the External Security profile."
-        return 1
+        echo "ℹ️  No new RSA keys to upload; MarkLogic already has every key the IdP publishes."
+        return 0
     fi
 
     echo ""
     echo "🔄 Preparing to upload ${#KEY_DATA[@]} new key(s) to MarkLogic..."
 
     # Create JSON payload
-    PAYLOAD_FILE="JWTSecretsPayload.json"
+    PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/JWTSecretsPayload.XXXXXX") || { echo "Error: cannot create temporary payload file" >&2; return 1; }
+    trap 'rm -f "$PAYLOAD_FILE"' EXIT
 
     # Start building JSON
     echo "{" > "$PAYLOAD_FILE"
@@ -314,21 +321,10 @@ upload_keys_to_marklogic() {
         echo "   - Verify admin credentials are correct"
         echo "   - Ensure the external security profile is configured for JWT tokens"
     fi
-
-    # # Keep or remove payload file
-    # echo ""
-    # read -p "Keep payload file '$PAYLOAD_FILE' for reference? (y/n): " -n 1 -r
-    # echo ""
-    # if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    #     rm -f "$PAYLOAD_FILE"
-    #     echo "🗑️  Payload file removed"
-    # else
-    #     echo "📁 Payload file kept: $PAYLOAD_FILE"
-    # fi
 }
 
-# Fetch JWKS data (with SSL options for self-signed certificates)
-JWKS_DATA=$(curl -s -k --connect-timeout 10 --max-time 30 "$JWKS_URL")
+# Fetch JWKS data. TLS is verified unless --insecure is given (keys fetched here are uploaded as trusted signing keys).
+JWKS_DATA=$(curl -s "${INSECURE_CURL[@]}" -L --max-redirs 3 --connect-timeout 10 --max-time 30 "$JWKS_URL")
 
 # Check if curl was successful
 if [ $? -ne 0 ]; then

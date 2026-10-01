@@ -32,7 +32,7 @@ CRON_MODE=false
 MARKLOGIC_HOST="localhost"
 MARKLOGIC_PORT=8002
 MARKLOGIC_USER="admin"
-MARKLOGIC_PASS="admin"
+MARKLOGIC_PASS="${MARKLOGIC_PASS:-admin}"  # environment variable preferred over --marklogic-pass (argv is visible in ps)
 
 # ================================================================
 # FUNCTIONS
@@ -133,7 +133,7 @@ rotate_get_existing_keys() {
 
     # Extract key IDs
     local key_ids
-    key_ids=$(echo "$body" | jq -r '.["external-security-properties"]["oauth-server"]["oauth-jwk-id"][]? // empty' 2>/dev/null)
+    key_ids=$(echo "$body" | jq -r '.["oauth-server"]["oauth-jwt-secrets"]["oauth-jwt-secret"][]?["oauth-jwt-key-id"] // empty' 2>/dev/null)
 
     if [ -z "$key_ids" ]; then
         ml_log_info "No existing keys found in configuration"
@@ -260,34 +260,32 @@ rotate_add_new_keys() {
             temp_script=$(mktemp)
 
             cat > "$temp_script" << 'EOFPYTHON'
-import sys
-import base64
-import json
-from binascii import a2b_base64
+import sys, json, base64, textwrap
 
-def base64url_to_int(val):
-    val = val.replace('-', '+').replace('_', '/')
-    padding = 4 - (len(val) % 4)
-    if padding != 4:
-        val += '=' * padding
-    return int.from_bytes(a2b_base64(val), byteorder='big')
+def b64u(v):
+    return base64.urlsafe_b64decode(v + '=' * (-len(v) % 4))
+
+def length(n):
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    return bytes([0x80 | len(b)]) + b
+
+def der_int(b):
+    b = b.lstrip(b'\x00') or b'\x00'
+    if b[0] & 0x80:
+        b = b'\x00' + b
+    return b'\x02' + length(len(b)) + b
 
 data = json.load(sys.stdin)
-n = base64url_to_int(data['n'])
-e = base64url_to_int(data['e'])
-
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-
-public_numbers = rsa.RSAPublicNumbers(e, n)
-public_key = public_numbers.public_key()
-
-pem = public_key.public_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
-)
-
-print(pem.decode('utf-8'))
+body = der_int(b64u(data['n'])) + der_int(b64u(data['e']))
+rsa_key = b'\x30' + length(len(body)) + body
+bitstr = b'\x03' + length(len(rsa_key) + 1) + b'\x00' + rsa_key
+spki_body = bytes.fromhex('300d06092a864886f70d0101010500') + bitstr
+spki = b'\x30' + length(len(spki_body)) + spki_body
+print('-----BEGIN PUBLIC KEY-----')
+print('\n'.join(textwrap.wrap(base64.b64encode(spki).decode(), 64)))
+print('-----END PUBLIC KEY-----')
 EOFPYTHON
 
             local pem_key
@@ -315,20 +313,15 @@ EOFPYTHON
 
         # Add key to MarkLogic using Management API
         local add_payload
-        add_payload=$(cat << EOF
-{
-  "operation": "add-jwk-id",
-  "jwk-id": "$kid"
-}
-EOF
-)
+        add_payload=$(jq -n --arg kid "$kid" --arg pem "$pem_key" \
+            '{"oauth-server":{"oauth-jwt-secret":[{"oauth-jwt-key-id":$kid,"oauth-jwt-secret-value":$pem}]}}') || continue
 
         local response status_code
         response=$(curl -s -w "%{http_code}" --anyauth -u "$MARKLOGIC_USER:$MARKLOGIC_PASS" \
             -X POST \
             -H "Content-Type: application/json" \
             -d "$add_payload" \
-            "http://$MARKLOGIC_HOST:$MARKLOGIC_PORT/manage/v2/external-security/$external_security/properties")
+            "http://$MARKLOGIC_HOST:$MARKLOGIC_PORT/manage/v2/external-security/$external_security/jwt-secrets")
 
         status_code="${response: -3}"
 
@@ -375,21 +368,11 @@ rotate_cleanup_old_keys() {
         fi
 
         # Remove key from MarkLogic
-        local remove_payload
-        remove_payload=$(cat << EOF
-{
-  "operation": "remove-jwk-id",
-  "jwk-id": "$kid"
-}
-EOF
-)
-
-        local response status_code
+        local response status_code kid_enc
+        kid_enc=$(jq -rn --arg k "$kid" '$k|@uri')
         response=$(curl -s -w "%{http_code}" --anyauth -u "$MARKLOGIC_USER:$MARKLOGIC_PASS" \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d "$remove_payload" \
-            "http://$MARKLOGIC_HOST:$MARKLOGIC_PORT/manage/v2/external-security/$external_security/properties")
+            -X DELETE \
+            "http://$MARKLOGIC_HOST:$MARKLOGIC_PORT/manage/v2/external-security/$external_security/jwt-secrets/$kid_enc")
 
         status_code="${response: -3}"
 
@@ -498,7 +481,7 @@ rotate_auto_detect_jwks_url() {
 
     # Extract JWKS URI
     local jwks_uri
-    jwks_uri=$(echo "$body" | jq -r '.["external-security-properties"]["oauth-server"]["oauth-jwks-uri"]? // empty' 2>/dev/null)
+    jwks_uri=$(echo "$body" | jq -r '.["oauth-server"]["oauth-jwks-uri"]? // empty' 2>/dev/null)
 
     if [ -z "$jwks_uri" ]; then
         ml_log_error "Could not auto-detect JWKS URL from configuration"
