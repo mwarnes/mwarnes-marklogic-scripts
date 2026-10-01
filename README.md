@@ -6,14 +6,58 @@ Documentation and walkthroughs: <https://mwarnes.github.io/scripts-browser/>
 This is the **single source of truth** for these scripts. Personal collection, not official
 Progress/MarkLogic documentation; test in a non-production environment before use.
 
+## Download
+
+Pick one. All three give you the same files from the `main` branch.
+
+```bash
+# 1. Clone (easiest to update later with `git pull`)
+git clone https://github.com/mwarnes/mwarnes-marklogic-scripts.git
+cd mwarnes-marklogic-scripts/scripts
+
+# 2. Tarball, no git needed
+curl -L https://github.com/mwarnes/mwarnes-marklogic-scripts/archive/refs/heads/main.tar.gz | tar xz
+cd mwarnes-marklogic-scripts-main/scripts
+
+# 3. Zip: https://github.com/mwarnes/mwarnes-marklogic-scripts/archive/refs/heads/main.zip
+```
+
+Download the whole `scripts/` directory, not a single file. Scripts load shared helpers
+(`marklogic-utils.sh`, and `OAUTH/oauth2-utils.sh`, `SAML/saml-utils.sh`, `LDAP/ldap-utils.sh`,
+`Kerberos/kerberos-utils.sh`, `TLS/tls-utils.sh` next to the scripts that use them) by relative path.
+Files fetched one by one from the raw URLs will fail with "No such file" on the first `source`.
+
+If you unpack a zip, the executable bit may be lost: run `chmod +x $(find . -name '*.sh')`.
+To pin a release, check out a tag or commit instead of `main`
+(`git checkout <commit>`), so a later update cannot change a tested script under you.
+
+### Requirements
+
+| Needed for | Tools |
+|---|---|
+| Every script | `bash` (3.2 or newer), `curl`, `jq`, `openssl` |
+| SAML, TLS metadata checks | `xmllint` (libxml2) |
+| LDAP | `ldapsearch`, `ldapwhoami` (OpenLDAP client tools) |
+| OAuth JWKS-to-PEM, a few helpers | `python3` |
+| Kerberos (untested) | `kinit`, `klist`, `kdestroy` (MIT Kerberos client) |
+| Let's Encrypt toolkit | `certbot`, AWS CLI access to Route 53 (see `scripts/TLS/README.md`) |
+
+macOS: `brew install jq libxml2 openldap` (curl, openssl and python3 are included or already present).
+Amazon Linux / RHEL: `sudo dnf install -y jq libxml2 openldap-clients`.
+Debian / Ubuntu: `sudo apt install -y jq libxml2-utils ldap-utils`.
+
 ## Quick start
 
 ```bash
-git clone https://github.com/mwarnes/mwarnes-marklogic-scripts.git && cd mwarnes-marklogic-scripts/scripts
+cd mwarnes-marklogic-scripts/scripts
 export MARKLOGIC_PASS='<admin password>'          # never pass passwords as CLI flags
 ./verify-marklogic-config.sh --config-type list --marklogic-host my-host
 ./TLS/configure-marklogic-tls.sh list-templates --marklogic-host https://my-host --marklogic-user admin
 ```
+
+Start with `--dry-run` wherever it exists. It prints what would change and does not contact the server.
+Secrets are read from environment variables (`MARKLOGIC_PASS`, `OAUTH_CLIENT_SECRET`, `LDAP_BIND_PASSWORD`,
+`TLS_CA_PASSWORD`, `ROTATE_NEW_CREDENTIAL`) or a hidden prompt; the scripts reject `--password VALUE` style flags.
 
 Every script supports `--help`; most support `--dry-run` and `--verbose`.
 Remote plain-HTTP is refused unless `MARKLOGIC_ALLOW_HTTP=true` (isolated test systems only).
@@ -35,7 +79,7 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 | `OAUTH/` (`configure-marklogic-oauth2.sh`, `validate-oauth2-config.sh`, `extract-jwks-keys.sh`, `cleanup-obsolete-jwks-keys.sh`, `rotate-oauth-keys.sh`), `SAML/` (`configure-marklogic-saml.sh`, `monitor-saml-certificates.sh`), `rotate-credentials.sh` (OAuth and SAML), and the OAuth/SAML paths of `configure-appserver-security.sh` and `verify-marklogic-config.sh` | Tested against MarkLogic 12.1.0 and authentik 2026.8: OAuth Resource Server and Authorization Code (RS256 only), SAML SP-initiated login with signed assertions, create/update/remove, JWKS key maintenance, secret rotation, and negative cases. Keycloak, Entra ID, Okta, ADFS and Auth0 are **not** tested. |
 | `SAML/configure-keycloak-saml-client.sh`, `SAML/test-saml-flow.sh` | **Keycloak only; not tested against Keycloak** (`--dry-run` / first redirect step only). Review before use. |
 
-Requires `bash`, `curl`, `jq` and `openssl`. The scripts run on macOS (bash 3.2) and Linux.
+The scripts run on macOS (bash 3.2) and Linux; see Requirements above.
 
 ## Reporting problems
 
