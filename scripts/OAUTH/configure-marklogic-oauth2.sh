@@ -437,6 +437,23 @@ apply_marklogic_config() {
         return 0
     fi
     
+    # MarkLogic 12.1 answers a duplicate POST with HTTP 500 (XDMP-UNDFUN) or 400 (MANAGE-CONFLICTINGCONFIG), not 409,
+    # so look first.
+    local exists_status
+    if ml_check_external_security_exists "$(oauth2_api_path_segment "$CONFIG_NAME")" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"; then exists_status=0; else exists_status=$?; fi
+    case $exists_status in
+        0)
+            if [ "$FORCE_UPDATE" != "true" ]; then
+                log_error "External security '$CONFIG_NAME' already exists; use --force to request a guarded update"
+                return 1
+            fi
+            update_marklogic_config "$config_json"
+            return $?
+            ;;
+        1) ;;
+        *) log_error "Could not check whether '$CONFIG_NAME' already exists"; return 1 ;;
+    esac
+
     local response status_code
     if ! ml_api_call_with_dryrun response "POST" "$endpoint" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$config_json"; then
         log_error "OAuth configuration request failed"
@@ -466,7 +483,8 @@ apply_marklogic_config() {
 # Keep an exact protected export before mutations; MarkLogic may redact secrets, so restore is manual.
 backup_existing_configuration() {
     local endpoint="$1" response status_code body file
-    if ! response=$(ml_api_request GET "$endpoint" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"); then
+    # /properties?format=json returns the full JSON (the bare resource URL returns XML and omits oauth-server).
+    if ! response=$(ml_api_request GET "$endpoint/properties?format=json" "$MARKLOGIC_USER" "$MARKLOGIC_PASS"); then
         log_error "Could not read existing configuration; refusing to mutate it"
         return 1
     fi
@@ -514,7 +532,8 @@ update_marklogic_config() {
     backup_existing_configuration "$endpoint" || return 1
 
     local response status_code
-    if ! ml_api_call_with_dryrun response "PUT" "$endpoint" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$config_json"; then
+    # PUT is accepted on /properties only (the bare resource URL is 404 for PUT).
+    if ! ml_api_call_with_dryrun response "PUT" "$endpoint/properties" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$config_json"; then
         log_error "OAuth configuration update request failed"
         return 1
     fi
@@ -705,6 +724,7 @@ remove_external_security_config() {
         401) log_error "Unauthorized - check MarkLogic credentials"; return 1 ;;
         403) log_error "MarkLogic user lacks permission to remove external security"; return 1 ;;
         404) log_error "External security configuration '$CONFIG_NAME' not found"; return 1 ;;
+        500) log_error "MarkLogic refused (HTTP 500). The usual cause is SEC-EXTERNALSECURITYINUSE: an app server still uses '$CONFIG_NAME'. Run: configure-appserver-security.sh --appserver <name> --remove-security, then retry"; return 1 ;;
         *) log_error "Failed to remove configuration (HTTP $status_code; response body suppressed)"; return 1 ;;
     esac
 }

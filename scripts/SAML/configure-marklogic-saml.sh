@@ -286,6 +286,7 @@ saml_create_external_security() {
                 return 1
             else
                 ml_log_warning "Overwriting existing external security '$EXTERNAL_SECURITY_NAME'"
+                SAML_EXISTS_FORCE=true
             fi
             ;;
         1)  # Does not exist - proceed with create
@@ -303,6 +304,13 @@ saml_create_external_security() {
     # Create external security JSON
     local external_security_json
     external_security_json=$(saml_create_external_security_json)
+
+    # Existing profile + --force: PUT /properties. (A POST with changed values returns 400 MANAGE-CONFLICTINGCONFIG,
+    # and an unchanged one is silently accepted, so POST cannot be used to update.)
+    if [ "${SAML_EXISTS_FORCE:-false}" = "true" ]; then
+        saml_update_external_security "$external_security_json"
+        return $?
+    fi
 
     # Apply external security to MarkLogic
     local response status_code
@@ -409,8 +417,8 @@ saml_delete_external_security() {
             ml_log_error "External security '$EXTERNAL_SECURITY_NAME' not found (HTTP $status_code)"
             return 1
             ;;
-        400)
-            ml_log_error "Bad request - external security may be in use by an app server (HTTP $status_code; response suppressed)"
+        400|500)
+            ml_log_error "MarkLogic refused (HTTP $status_code). The usual cause is SEC-EXTERNALSECURITYINUSE: an app server still uses it. Run: configure-appserver-security.sh --appserver <name> --remove-security, then retry"
             return 1
             ;;
         *)
@@ -433,7 +441,7 @@ saml_update_external_security() {
         return 1
     fi
     saml_backup_resource "/manage/v2/external-security/$name_path/properties?format=json" "SAML external-security '$EXTERNAL_SECURITY_NAME'" || return 1
-    if ml_api_call_with_dryrun response "PUT" "/manage/v2/external-security/$name_path" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$external_security_json"; then
+    if ml_api_call_with_dryrun response "PUT" "/manage/v2/external-security/$name_path/properties" "$MARKLOGIC_USER" "$MARKLOGIC_PASS" "$external_security_json"; then
         status_code=$(ml_extract_status_code "$response")
     else
         case $? in
@@ -1066,9 +1074,13 @@ CREATE-EXTERNAL-SECURITY OPTIONS:
     --idp-metadata-file FILE      Identity Provider metadata file
     --sp-certificate-file FILE    SP certificate file
     --sp-private-key-file FILE    SP private key file
-    --name-id-format FORMAT       NameID format (default: email)
-    --saml-binding BINDING        SAML binding: HTTP-POST, HTTP-Redirect (default: HTTP-POST)
-    --clock-skew SECONDS          Clock skew allowance in seconds (default: 300)
+    --name-id-format FORMAT       NameID format written into generated SP metadata only (default: email).
+                                  MarkLogic itself always sends NameIDPolicy "unspecified" in AuthnRequests
+    --saml-binding BINDING        Which IdP SSO endpoint to read from the IdP metadata: HTTP-POST or
+                                  HTTP-Redirect (default: HTTP-POST). MarkLogic 12.1 sends AuthnRequests
+                                  by redirect and receives the response by POST regardless
+    --clock-skew SECONDS          Accepted but NOT applied: MarkLogic 12.1 has no clock-skew property
+                                  for external security (keep IdP and MarkLogic clocks in sync)
     --attribute-mapping JSON      Attribute mapping configuration
     --force                       Request overwrite after protected snapshot and confirmation
 
