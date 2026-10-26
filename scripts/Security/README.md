@@ -22,8 +22,8 @@ anything is written. Output: `./<area>-gather-<timestamp>/` with `SUMMARY.md`, t
 
 Requirements: `python3` (standard library only), `curl`, `openssl`. Tests: `python3 -m unittest discover -s scripts/Security/tests`.
 
-Companion for the logs: `ml-trace-events.py enable|disable|status --preset saml|oauth|ldap` (in the MarkLogic support skill's
-`assets/support-scripts`) switches the trace events on before the test and off afterwards.
+Companion for the logs: `ml-trace-events.py enable|disable|status --preset saml|oauth|ldap` (in this folder, next to
+`ml-security-gather.py`) switches the trace events on before the test and off afterwards. Run both from this folder.
 
 ## Temporary versus permanent certificates (`https`)
 

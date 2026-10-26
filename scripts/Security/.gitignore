@@ -1,0 +1,5 @@
+# output of ml-security-gather.py and the state file of ml-trace-events.py
+*-gather-*/
+*-gather-*.zip
+.ml-trace-events-state.json
+__pycache__/
