@@ -232,6 +232,34 @@ certbot certonly --dns-route53 -d example.com \
   --deploy-hook /usr/local/bin/marklogic-cert-deploy-wrapper.sh
 ```
 
+**Before the first renewal: the template must exist.** `ML_CERT_TEMPLATE` has to name a template that already exists on the
+server. If it does not, the hook refuses safely (`Previous certificate-template state is unavailable or invalid; refusing
+deployment.`) after Certbot has already obtained the certificate. A template created through the Management API needs an
+`organizationName` in `req.subject` (`PKI-NOORGNAME` otherwise) and holds **no** certificate until the first deploy.
+
+**Serve the complete chain: import the intermediate once (tested on MarkLogic 12.1.0).** The hook sends `cert.pem` only, and
+`insert-host-certificates` accepts exactly one certificate: a bundle such as `fullchain.pem` is rejected (HTTP 400,
+`PKI-BADCERTIFICATE`). MarkLogic sends the chain it can build from its **trusted certificate authorities**, so without the
+issuing CA there the port sends the leaf only and clients that do not already have the intermediate fail with `unable to verify
+the first certificate`. Import the issuing CA certificate once per issuing CA (the intermediate is the second certificate in
+`fullchain.pem`), for example in Query Console against the **Security** database:
+
+```xquery
+xquery version "1.0-ml";
+import module namespace pki = "http://marklogic.com/xdmp/pki" at "/MarkLogic/pki.xqy";
+let $pem := '-----BEGIN CERTIFICATE-----
+...paste the intermediate certificate here...
+-----END CERTIFICATE-----'
+return pki:insert-trusted-certificates($pem)   (: returns the certificate id; pki:delete-certificate($id) removes it :)
+```
+
+The port then sends leaf plus intermediate at once, without a restart. Check with
+`openssl s_client -connect HOST:PORT -servername HOST -showcerts`: two certificates. The client still needs the **root** in its own
+trust store; the newer Let's Encrypt roots (for example `Root YE`) are missing from older trust stores, which then report
+`unable to get local issuer certificate` even though the server chain is complete. The support must-gather
+(`../Security/ml-security-gather.py https`) reports the template's certificate as TEMPORARY or PERMANENT, whether the port serves
+it, and a missing intermediate.
+
 For detailed setup instructions, troubleshooting, and auto-renewal configuration, see the [TLS Certificate Management article](../../articles/TLS_CERTIFICATE_MANAGEMENT.md).
 
 ## 🔐 Certificate Types

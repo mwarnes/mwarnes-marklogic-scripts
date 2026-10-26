@@ -39,6 +39,7 @@ To pin a release, check out a tag or commit instead of `main`
 | SAML, TLS metadata checks | `xmllint` (libxml2) |
 | LDAP | `ldapsearch`, `ldapwhoami` (OpenLDAP client tools) |
 | OAuth JWKS-to-PEM, a few helpers | `python3` |
+| `Security/ml-security-gather.py` (support must-gather) | `python3` (standard library only), `curl`, `openssl` |
 | Kerberos (untested) | `kinit`, `klist`, `kdestroy` (MIT Kerberos client) |
 | Let's Encrypt toolkit | `certbot`, AWS CLI access to Route 53 (see `scripts/TLS/README.md`) |
 
@@ -77,6 +78,7 @@ Keep `marklogic-utils.sh` (and `TLS/tls-utils.sh`) alongside the scripts that so
 | `LDAP/configure-marklogic-ldap.sh` | Tested against MarkLogic 12.1 and a 389 Directory Server: create (simple bind over ldap/ldaps/StartTLS, authorization internal or ldap, mutual TLS with a client certificate), update with `--force`, configure app server, validate, test, search, schema, delete, and `whoami` (client-certificate mapping check). Active Directory behaviour is documented from Microsoft's documentation and not run |
 | `Kerberos/` | **Use at your own risk: not tested on MarkLogic 11 or 12** (no Kerberos environment available; only syntax and option checks were run). Known problem: `configure-marklogic-kerberos.sh configure-appserver` sends `negotiate` / `basic+negotiate`, which MarkLogic 12 rejects (`XDMP-VALIDATEBADTYPE`); the 12.1 value is `kerberos-ticket`, which also requires internal security to be disabled on the app server |
 | `OAUTH/` (`configure-marklogic-oauth2.sh`, `validate-oauth2-config.sh`, `extract-jwks-keys.sh`, `cleanup-obsolete-jwks-keys.sh`, `rotate-oauth-keys.sh`), `SAML/` (`configure-marklogic-saml.sh`, `monitor-saml-certificates.sh`), `rotate-credentials.sh` (OAuth and SAML), and the OAuth/SAML paths of `configure-appserver-security.sh` and `verify-marklogic-config.sh` | Tested against MarkLogic 12.1.0 and authentik 2026.8: OAuth Resource Server and Authorization Code (RS256 only), SAML SP-initiated login with signed assertions, create/update/remove, JWKS key maintenance, secret rotation, and negative cases. Keycloak, Entra ID, Okta, ADFS and Auth0 are **not** tested. |
+| `Security/ml-security-gather.py` (`saml`, `oauth`, `ldap`, `https` areas) | Read-only support must-gather. Tested against MarkLogic 12.1.0 and 11.3.7 (SAML on 12.1.0 with authentik and a real login; OAuth Resource server on both and Authorization code on 12.1.0; LDAP against a 389 Directory Server over LDAPS; HTTPS app servers with private-CA and temporary certificates), plus 14 unit tests against a mock Management API and IdP (`scripts/Security/tests`). The OAuth access-token signature check (RS256) was tested only with tokens signed by a test key, not with a token from a real IdP; the ErrorLog/AccessLog analysis of OAuth and LDAP was tested only on crafted log lines. Active Directory, Entra ID, Okta, ADFS and Auth0 are **not** tested |
 | `SAML/configure-keycloak-saml-client.sh`, `SAML/test-saml-flow.sh` | **Keycloak only; not tested against Keycloak** (`--dry-run` / first redirect step only). Review before use. |
 
 The scripts run on macOS (bash 3.2) and Linux; see Requirements above.
