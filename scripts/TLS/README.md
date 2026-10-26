@@ -260,6 +260,13 @@ trust store; the newer Let's Encrypt roots (for example `Root YE`) are missing f
 (`../Security/ml-security-gather.py https`) reports the template's certificate as TEMPORARY or PERMANENT, whether the port serves
 it, and a missing intermediate.
 
+**The issuing intermediate can change at every renewal, and MarkLogic 11 needs one more fix in the hook.** Let's Encrypt signs with one of several
+intermediates (seen: `YE1` and `YE2`): each one must be imported once, otherwise the port sends the leaf only after a renewal. To let clients that trust
+only an older root verify the chain, also import the cross-signed certificates that follow the intermediate in `fullchain.pem` (the third and fourth
+certificate: `Root YE` signed by `ISRG Root X2`, and `ISRG Root X2` signed by `ISRG Root X1`); MarkLogic then sends them as well (tested on 12.1.0 and 11.3.7).
+The deploy hook reads the template before changing it: MarkLogic 11 answers `GET .../certificate-templates/<name>/properties` with HTTP 400, so the hook now falls
+back to `GET .../certificate-templates/<name>` (before this change it refused to deploy on MarkLogic 11 with "Previous certificate-template state is unavailable or invalid").
+
 For detailed setup instructions, troubleshooting, and auto-renewal configuration, see the [TLS Certificate Management article](../../articles/TLS_CERTIFICATE_MANAGEMENT.md).
 
 ## 🔐 Certificate Types

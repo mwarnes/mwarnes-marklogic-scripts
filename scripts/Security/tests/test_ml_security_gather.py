@@ -67,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/manage/v2/groups/Default/properties":
             return self.reply({"group-name": "Default", "events-activated": True, "event": ["OAuth", "External Authenticate"]})
         if p == "/manage/v2/logs":
-            return self.reply(ERRLOG if "ErrorLog" in self.path else ACCESS, text=True)
+            return self.reply((ERRLOG + STATE.get("errlog_extra", "")) if "ErrorLog" in self.path else ACCESS, text=True)
         if p == "/iss/.well-known/openid-configuration":
             return self.reply({"issuer": ISS, "jwks_uri": "http://127.0.0.1:%d/jwks" % PORT})
         if p == "/jwks":
@@ -207,6 +207,45 @@ class GatherTests(unittest.TestCase):
         self.assertIn("check `ldap-base`", s)
         for f in Path(out).glob("AccessLog-*"):
             self.assertNotIn("q=secret", f.read_text())
+
+    AC_FIRST_LEG = (
+        "2026-10-25 10:00:06.000 Info: [Event:id=OAuth Status] getRedirectURI() called with stateVal: (empty)\n"
+        "2026-10-25 10:00:06.001 Info: [Event:id=OAuth Status] OAuth redirect URI: https://idp.example/application/o/authorize/?state=x\n"
+        "2026-10-25 10:00:06.002 Info: [Event:id=External Authenticate] External authentication failed: user=\n")
+
+    def test_authorization_code_first_leg_is_not_an_error_but_a_missing_return_is_warned(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        STATE["errlog_extra"] = self.AC_FIRST_LEG
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *win)
+        finally:
+            STATE.pop("errlog_extra", None)
+        self.assertNotIn("stateVal: (empty)` -", s)
+        self.assertNotIn("External authentication failed: user=` -", s)
+        self.assertIn("browser was sent to the IdP but never came back", s)
+
+    def test_idp_oauth_error_gets_a_hint_and_no_missing_return_warning(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        STATE["errlog_extra"] = self.AC_FIRST_LEG + "2026-10-25 10:00:07.000 Info: [Event:id=OAuth Status] OAuth Error: 'invalid_request',  Description: The request is otherwise malformed\n"
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *win)
+        finally:
+            STATE.pop("errlog_extra", None)
+        self.assertIn("does not allow the `authorization_code` grant type", s)
+        self.assertNotIn("never came back", s)
+
+    def test_tokens_in_log_lines_are_removed_whole(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        STATE["errlog_extra"] = ("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] OAuth JWT Access Token: eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJodHRwIn0.SIGNATUREPARTxyz123\n"
+                                 '2026-10-25 10:00:09.000 Info: [Event:id=OAuth Communications] Response code: 200 Response: {"access_token": "eyJa.eyJb.SECONDSIG987", "x": 1}\n'
+                                 "2026-10-25 10:00:10.000 Info: [Event:id=OAuth Status] OAuth JWT Access Token: <163 chars removed>.<779 chars removed>.THIRDSIGabc456\n")
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *win)
+        finally:
+            STATE.pop("errlog_extra", None)
+        text = "".join(f.read_text() for f in Path(out).glob("ErrorLog-*")) + s
+        for sig in ("SIGNATUREPARTxyz123", "SECONDSIG987", "THIRDSIGabc456"):
+            self.assertNotIn(sig, text)
 
     def test_start_and_end_accept_zone_offsets_and_bare_times_as_utc(self):
         # the mock ErrorLog has lines at 10:00 UTC on 2026-10-25; 11:00+02:00 is 09:00 UTC, a bare 11:00:00 is taken as UTC

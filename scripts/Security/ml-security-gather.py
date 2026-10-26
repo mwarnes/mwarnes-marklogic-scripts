@@ -496,7 +496,11 @@ HINTS = [
 def scrub(line):
     line = re.sub(r"((?:SAMLRequest|SAMLResponse|Signature|RelayState)=)[^&\s]+", r"\1<removed>", line)
     line = re.sub(r"(<(?:ds:)?(?:SignatureValue|DigestValue|X509Certificate)>)[^<]*", r"\1<removed>", line)
-    return re.sub(r"[A-Za-z0-9+/=%]{120,}", lambda m: "<%d chars removed>" % len(m.group(0)), line)
+    # whole tokens: a JWT (header.payload.signature), and the token values of a token-endpoint response
+    line = re.sub(r"eyJ[\w-]+\.eyJ[\w-]+\.[\w-]*", "<JWT removed>", line)
+    line = re.sub(r'("(?:access_token|refresh_token|id_token)"\s*:\s*")[^"]*', r"\1<removed>", line)
+    line = re.sub(r"[A-Za-z0-9+/=%]{120,}", lambda m: "<%d chars removed>" % len(m.group(0)), line)
+    return re.sub(r"(?:<JWT removed>|<\d+ chars removed>)\.<\d+ chars removed>\.[\w-]+", "<JWT removed>", line)
 
 
 def load_role_map(api, out, errors):
@@ -1176,6 +1180,23 @@ def tls_probe(host, port, starttls=None, cafile=None, timeout=20):
     return res
 
 
+def legacy_client_probe(host, port, timeout=20):
+    """Can a TLS 1.2 client without the extended master secret extension (like MarkLogic 11's HTTPS client) connect?
+    Returns True/False, or None when this openssl cannot run the test."""
+    cmd = ["openssl", "s_client", "-connect", "%s:%s" % (host, port), "-tls1_2", "-no_ems"]
+    if not re.match(r"^[\d.]+$|:", host):
+        cmd += ["-servername", host]
+    try:
+        r = subprocess.run(cmd, input="", capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    txt = r.stdout + r.stderr
+    if re.search(r"unknown option|Invalid option|-no_ems", txt) and "BEGIN CERTIFICATE" not in txt:
+        return None
+    m = re.search(r"New, (\S+), Cipher is (\S+)", txt)
+    return bool(m and m.group(2) not in ("(NONE)", "0000"))
+
+
 def host_matches(der, host):
     rc, out = openssl(["x509", "-noout", "-checkhost", host], der_to_pem(der))
     if rc != 0 and "unknown option" in out.lower():
@@ -1239,6 +1260,11 @@ def analyse_tls_chain(c, label, probe, host, check_ml_trust=False):
 
 # ---------------------------------------------------------------- generic logs (OAuth, LDAP, HTTPS)
 OAUTH_HINTS = [
+    (r"OAuth Error: 'invalid_request'", "The IdP refused the authorization request and sent the browser back with this error. In authentik the usual cause is that the provider does not allow the `authorization_code` grant type (the IdP's own log says `Invalid grant_type for provider`)."),
+    (r"OAuth Error: 'invalid_client'|invalid_client", "The IdP does not accept the client id / client secret / authentication method that MarkLogic sent to the token endpoint."),
+    (r"OAuth Error: 'invalid_grant'|invalid_grant", "The IdP rejected the authorization code (already used, expired after about a minute, or the redirect URI sent to the token endpoint differs from the one used to authorize)."),
+    (r"OAuth Error", "The IdP returned an OAuth error to MarkLogic; the error code and description are in the message."),
+    (r"SVC-SOCCONN|Socket connect|SSL_connect", "MarkLogic could not open a TLS connection to the IdP (JWKS or token endpoint): network, CA trust, or a TLS protocol/extension the IdP requires (see the IdP endpoint checks)."),
     (r"Issuer URI must be configured", "`oauth-jwt-issuer-uri` is not set; MarkLogic validates the token's `iss` claim against it."),
     (r"JWT validation failed, re-initiating", "Token validation failed and MarkLogic restarted the authorization flow (the browser loops back to the IdP). The line before it gives the reason."),
     (r"Access token provided is empty", "The request carries no bearer token, or an empty one."),
@@ -1355,7 +1381,9 @@ def analyse_logs_generic(c, area, bound):
             tn = {k: v.get("name") for k, v in templates_by_id(c).items()}
             all_msgs = [(h, ts, level, re.sub(r"certificate template (\d+)", lambda m: "certificate template %s (%s)" % (m.group(1), tn.get(m.group(1), "unknown")), b))
                         for h, ts, level, b in all_msgs]
-        errs = [(ts, scrub(b)[:160], level) for h, ts, level, b in all_msgs if re.search(cfgl["error"], b) and not re.search(r"\bpass\b", b)]
+        benign = r"External authentication failed: user=\s*$|stateVal: \(empty\)"
+        errs = [(ts, scrub(b)[:160], level) for h, ts, level, b in all_msgs
+                if re.search(cfgl["error"], b) and not re.search(r"\bpass\b", b) and not re.search(benign, scrub(b))]
         grouped, levels = {}, {}
         for ts, b, level in errs:
             grouped.setdefault(b, []).append(ts)
@@ -1364,6 +1392,14 @@ def analyse_logs_generic(c, area, bound):
             hint = next((t for pat, t in cfgl["hints"] if re.search(pat, msg)), None)
             check("WARN" if levels[msg] == "Warning" else "FAIL", "%s %s, first at %s (%d time%s)" % (area.upper(), "warning" if levels[msg] == "Warning" else "error", times[0], len(times), "" if len(times) == 1 else "s"),
                   "`%s`%s" % (msg, (" - " + hint) if hint else ""))
+        if area == "oauth":
+            redirects = sum(1 for _, _, _, b in all_msgs if re.search(r"OAuth redirect URI: https?://\S*(authorize|auth)", b))
+            callbacks = sum(1 for _, _, _, b in all_msgs if "via the 'authorization_code' flow" in b or "OAuth Error" in b)
+            if redirects and not callbacks:
+                check("WARN", "browser was sent to the IdP but never came back",
+                      "%d redirect(s) to the IdP and no return with an authorization code in the window. Check what the browser showed at the IdP "
+                      "(for example a redirect URI error) and the IdP's own log: the redirect URI registered at the IdP must equal `oauth-redirect-uri` "
+                      "(MarkLogic sends the app server URL), and the provider must allow the authorization_code grant" % redirects)
         passes = sum(1 for _, _, _, b in all_msgs if re.search(r"\bpass\b", b))
         if passes and not errs:
             check("PASS", "external authentication passed", "%d pass line(s); no error lines" % passes)
@@ -1517,8 +1553,17 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
             if hit:
                 check("PASS", "role claim values map to MarkLogic roles", "; ".join("`%s` -> %s" % (k, ", ".join(v)) for k, v in hit.items()))
             else:
+                other = []
+                for cn, cv in claims.items():
+                    if cn == ra:
+                        continue
+                    cv = cv if isinstance(cv, list) else [cv]
+                    m = [str(v) for v in cv if isinstance(v, (str, int)) and str(v) in role_map]
+                    if m:
+                        other.append("`%s` (%s)" % (cn, ", ".join(m)))
                 check("FAIL", "role claim values map to a MarkLogic role",
-                      "none of the %d value(s) in `%s` equals the external name of any role" % (len(vals), ra))
+                      "none of the %d value(s) in `%s` equals the external name of any role%s" % (len(vals), ra,
+                      ". Another claim does match: %s. If that is the claim that carries the roles, set `oauth-role-attribute` to it" % "; ".join(other) if other else ""))
     if alg == "RS256" and jwks:
         keys = [k for k in jwks.get("keys", []) if k.get("kty") == "RSA"]
         cand = [k for k in keys if k.get("kid") == kid] or ([] if kid else keys)
@@ -1641,6 +1686,12 @@ def run_oauth(c):
                 c.probed.add((h, port))
                 pr = tls_probe(h, port)
                 analyse_tls_chain(c, "IdP endpoint %s:%s" % (h, port), pr, h, check_ml_trust=True)
+                if c.major and c.major < 12 and not pr.get("error") and legacy_client_probe(h, port) is False:
+                    check("FAIL", "IdP endpoint %s:%s accepts MarkLogic %s's HTTPS client" % (h, port, c.version),
+                          "a TLS 1.2 handshake without the extended master secret extension is refused (the IdP needs TLS 1.3 or that extension, "
+                          "for example a Go server in FIPS mode). MarkLogic 11's client offers neither, so fetching the JWKS fails with "
+                          "XDMP-OAUTH ... SVC-SOCCONN 'sslv3 alert handshake failure' even though this machine connects. Put a TLS proxy "
+                          "that accepts such clients in front of the IdP, or use MarkLogic 12")
         say("")
     elif profiles:
         missing("IdP endpoint, JWKS and TLS checks", "--no-probe given", "run without --no-probe from a machine that can reach the IdP")

@@ -22,6 +22,12 @@ anything is written. Output: `./<area>-gather-<timestamp>/` with `SUMMARY.md`, t
 
 Requirements: `python3` (standard library only), `curl`, `openssl`. Tests: `python3 -m unittest discover -s scripts/Security/tests`.
 
+OAuth checks added after testing with real tokens (authentik) on MarkLogic 11.3.7 and 12.1.0: the role-claim check names another claim that does match a role
+(`oauth-role-attribute` set to the wrong claim); on MarkLogic 11 a FAIL when the IdP endpoint refuses a TLS 1.2 client without the extended master secret
+extension (MarkLogic 11's HTTPS client cannot fetch the JWKS then); for the Authorization code flow a WARN when the browser was sent to the IdP and never came back;
+the first-request lines of an Authorization code login (`getRedirectURI() ... (empty)`, `External authentication failed: user=`) are not counted as errors; whole JWTs
+and token-endpoint responses are removed from the saved logs.
+
 Companion for the logs: `ml-trace-events.py enable|disable|status --preset saml|oauth|ldap` (in this folder, next to
 `ml-security-gather.py`) switches the trace events on before the test and off afterwards. Run both from this folder.
 
