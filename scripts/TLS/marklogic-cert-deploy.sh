@@ -184,6 +184,12 @@ chmod 600 "$BACKUP_FILE" || { rm -f "$BACKUP_FILE"; fail "Could not secure the b
 GET_URL="${ML_SCHEME}://${ML_HOST}:${ML_PORT}/manage/v2/certificate-templates/${template_path}/properties?format=json"
 GET_CODE=$(curl -sS --connect-timeout 10 --max-time 30 -K "$CURL_CONFIG" -o "$BACKUP_FILE" -w "%{http_code}" -X GET "$GET_URL" \
   -H "Accept: application/json" ${CURL_TLS_OPTS[@]+"${CURL_TLS_OPTS[@]}"}) || { rm -f "$BACKUP_FILE"; fail "Could not read previous certificate-template state."; }
+if [[ "$GET_CODE" != "200" ]]; then
+  # MarkLogic 11 has no /properties view for certificate templates (HTTP 400); read the template itself.
+  GET_URL="${ML_SCHEME}://${ML_HOST}:${ML_PORT}/manage/v2/certificate-templates/${template_path}?format=json"
+  GET_CODE=$(curl -sS --connect-timeout 10 --max-time 30 -K "$CURL_CONFIG" -o "$BACKUP_FILE" -w "%{http_code}" -X GET "$GET_URL" \
+    -H "Accept: application/json" ${CURL_TLS_OPTS[@]+"${CURL_TLS_OPTS[@]}"}) || { rm -f "$BACKUP_FILE"; fail "Could not read previous certificate-template state."; }
+fi
 if [[ "$GET_CODE" != "200" ]] || ! jq -e . "$BACKUP_FILE" >/dev/null 2>&1; then
   rm -f "$BACKUP_FILE"
   fail "Previous certificate-template state is unavailable or invalid; refusing deployment."
