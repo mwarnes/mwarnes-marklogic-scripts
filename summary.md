@@ -19,7 +19,7 @@ The scripts and labs were built during support ticket 01967797 (SAML 401 after a
 | other `scripts/*` | Older scripts (Kerberos, LDAP, OAUTH, SAML, security audit); not part of this work. |
 
 A byte-identical copy of `ml-security-gather.py` (and `ml-trace-events.py`) lives in
-`~/Projects/marklogic-support-skill/skills/marklogic-support/assets/support-scripts/`. After every change here, copy the file there and check with `cmp`.
+`~/Projects/marklogic-support-skill/skills/marklogic-support/assets/support-scripts/`. After every change here, run `scripts/Security/sync-support-scripts.sh` (copies both scripts and checks them with `cmp`; a symlink was rejected because the skill repository is published and a symlink would dangle in other clones).
 
 ## How the gather script works (decisions worth keeping)
 
