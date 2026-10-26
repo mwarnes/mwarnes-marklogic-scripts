@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.12.1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>SAML configuration gather (sample output)</title>
+  <style>
+
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+</style>
+  <style type="text/css">body{font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;line-height:1.45;color:#222}
+table{border-collapse:collapse;margin:1em 0;width:100%;font-size:.9em}
+th,td{border:1px solid #ccc;padding:.35em .6em;vertical-align:top;text-align:left}
+th{background:#f0f0f0}
+code{background:#f5f5f5;padding:0 .25em;word-break:break-word}
+h1,h2,h3{border-bottom:1px solid #eee;padding-bottom:.2em}
+</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">SAML configuration gather (sample output)</h1>
+</header>
+<h1 id="saml-configuration-gather">SAML configuration gather</h1>
+<p>Collected 2026-10-25 09:10 UTC from ml1.example.com:8002 as
+<code>admin</code>. Nothing was changed on the server.</p>
+<p>MarkLogic version: 12.1.0 (cluster
+<code>ml1.example.com-cluster</code>) Hosts: ml1.example.com</p>
+<h2 id="external-security-objects">External security objects</h2>
+<h3 id="manage-clone-saml"><code>Manage-Clone-SAML</code></h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>authentication</td>
+<td><code>saml</code></td>
+</tr>
+<tr>
+<td>authorization</td>
+<td><code>saml</code></td>
+</tr>
+<tr>
+<td>cache-timeout</td>
+<td><code>60</code></td>
+</tr>
+<tr>
+<td>saml-entity-id</td>
+<td><code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code></td>
+</tr>
+<tr>
+<td>saml-destination</td>
+<td><code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</code></td>
+</tr>
+<tr>
+<td>saml-issuer</td>
+<td><code>https://ml1.example.com:8012</code></td>
+</tr>
+<tr>
+<td>saml-assertion-host</td>
+<td><code>not set</code></td>
+</tr>
+<tr>
+<td>saml-authn-signature</td>
+<td><code>sha256</code></td>
+</tr>
+<tr>
+<td>saml-attribute-names</td>
+<td><code>none</code></td>
+</tr>
+<tr>
+<td>saml-sp-certificate</td>
+<td>set</td>
+</tr>
+<tr>
+<td>saml-sp-private-key</td>
+<td>set (value never collected)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="manage-clone-saml-saml-idp-certificate-authority"><code>Manage-Clone-SAML</code>
+saml-idp-certificate-authority</h4>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Subject</th>
+<th>Issuer</th>
+<th>Valid</th>
+<th>Expires in</th>
+<th>SHA-1</th>
+<th>Sig / key</th>
+<th>CA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>OU=Self-signed,O=authentik,CN=authentik Self-signed Certificate</code></td>
+<td><code>CN=authentik 2026.8.3</code></td>
+<td>2026-09-20 to 2027-09-21</td>
+<td>331 days</td>
+<td><code>23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</code></td>
+<td>sha256WithRSAEncryption / 4096</td>
+<td>n/a</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>#1 is issued by <code>CN=authentik 2026.8.3</code>, which is
+<strong>not in the stored bundle</strong>.</li>
+</ul>
+<h4 id="manage-clone-saml-saml-sp-certificate"><code>Manage-Clone-SAML</code>
+saml-sp-certificate</h4>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Subject</th>
+<th>Issuer</th>
+<th>Valid</th>
+<th>Expires in</th>
+<th>SHA-1</th>
+<th>Sig / key</th>
+<th>CA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>CN=ml1.example.com-manage-clone-saml-sp</code></td>
+<td><code>CN=ml1.example.com-manage-clone-saml-sp</code></td>
+<td>2026-10-24 to 2027-10-24</td>
+<td>364 days</td>
+<td><code>7C:67:3C:02:03:23:6D:04:6E:84:03:6E:1F:91:7E:B8:F7:94:84:5E</code></td>
+<td>sha256WithRSAEncryption / 2048</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>#1 is self-signed (it is its own trust anchor); signature check:
+ok</li>
+</ul>
+<h2 id="app-servers-using-these-objects">App servers using these
+objects</h2>
+<ul>
+<li><code>manage-clone</code> (group <code>Default</code>, port 8012):
+authentication <code>saml</code>, internal-security <code>True</code>,
+external-security <code>Manage-Clone-SAML</code>, TLS template
+<code>MarkLogic-Test</code></li>
+</ul>
+<h2 id="users-roles-and-external-names">Users, roles and external
+names</h2>
+<ul>
+<li><code>tuser1</code>: external names [&#39;tuser1&#39;]; roles
+[&#39;qconsole-user&#39;]
+<ul>
+<li>role <code>qconsole-user</code> external names: [&#39;qconsole-user&#39;];
+inherits none; privileges: environment-ui, qconsole</li>
+</ul></li>
+</ul>
+<p>With authorization <code>saml</code>, MarkLogic matches the
+assertion&#39;s Group values to the external names of roles (12.1.0 lab). In
+the same lab, with authorization <code>internal</code> a user&#39;s external
+name did NOT give that user any roles [unverified beyond one test].</p>
+<h2 id="idp-metadata-check">IdP metadata check</h2>
+<ul>
+<li>entityID:
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code></li>
+<li>SingleSignOnService HTTP-Redirect:
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</code></li>
+<li>SingleSignOnService HTTP-POST:
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</code></li>
+<li>signing certificate:
+<code>OU=Self-signed,O=authentik,CN=authentik Self-signed Certificate</code>,
+expires 2027-09-21, SHA-1
+<code>23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</code></li>
+</ul>
+<h2 id="saml-response-check">SAML response check</h2>
+<ul>
+<li>Issuer(s):
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code></li>
+<li>Audience: <code>https://ml1.example.com:8012</code></li>
+<li>Response Destination: <code>https://ml1.example.com:8012/</code>,
+IssueInstant 2026-10-24T15:27:04Z</li>
+<li>Signed elements: Assertion</li>
+<li>Conditions: NotBefore 2026-10-24T15:22:04Z, NotOnOrAfter
+2026-10-24T15:32:04Z (checked against the time this script ran:
+2026-10-25T09:10Z) (a captured response is normally expired by now;
+compare with the time of the failed request, not with the time of this
+check)</li>
+<li>Signing certificate embedded in the response: SHA-1
+<code>23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</code></li>
+<li>NameID: <code>tuser1</code></li>
+<li>Attribute names:
+<code>http://schemas.goauthentik.io/2021/02/saml/username</code> (1
+value(s)), <code>http://schemas.xmlsoap.org/claims/Group</code> (1
+value(s))</li>
+<li>Matched: NameID matches an external name (user tuser1)</li>
+<li>Matched: attribute
+<code>http://schemas.goauthentik.io/2021/02/saml/username</code> value
+<code>tuser1</code> matches (user tuser1)</li>
+<li>Matched: attribute
+<code>http://schemas.xmlsoap.org/claims/Group</code> value
+<code>qconsole-user</code> matches (role qconsole-user)</li>
+</ul>
+<h2 id="logs-2026-10-24t153016z-to-2026-10-24t153300z-utc">Logs
+(2026-10-24T15:30:16Z to 2026-10-24T15:33:00Z UTC)</h2>
+<p>Log times are written in each host&#39;s local time zone; the window
+above is UTC. If a host is not on UTC, widen the window or pass
+--start/--end.</p>
+<ul>
+<li><p>Trace events, group <code>Default</code>: mechanism ON, events:
+SAML, SAML Response, External Authenticate</p></li>
+<li><p>ErrorLog on <code>ml1.example.com</code>: 95 SAML/authentication
+line(s) in the window (saved as ErrorLog-saml-*.txt)</p></li>
+<li><p>AccessLog <code>8012_AccessLog.txt</code> on
+<code>ml1.example.com</code>: 0 request(s) in the window</p></li>
+</ul>
+<h3 id="saml-validation-steps-seen">SAML validation steps seen</h3>
+<table>
+<thead>
+<tr>
+<th>Count</th>
+<th>Message</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>External authentication failed: user=</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: status is Success</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: assertion count is 1</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: Issuer matches configured IdP</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: Audience matches SP entity ID</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: notOnOrAfter <time> is valid</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Saml Response: NotBefore <time> is valid</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Saml Response samlId:<id> Username:tuser1 Group: tuser1
+qconsole-user Valid from:<time> Valid until:<time></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Saml Response: signature is valid</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Saml Response: signed element matches assertion</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Saml Response is valid</td>
+</tr>
+<tr>
+<td>4</td>
+<td>ExternalSecurity[Manage-Clone-SAML] pass</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Authenticate url:/manage/v2 samlId(Cookie):</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Cached Response not found for samlId:</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Authn Request: &lt;AuthnRequest xmlns= ... (XML/URL not
+shown)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Authn Signature uses sha256</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Redirect to IDP: <a href="https://auth.warne">https://auth.warne</a> ... (XML/URL not
+shown)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Authenticate url:/ samlId(Cookie):</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Response: recipient <a href="https://ml1.example.com:8012/">https://ml1.example.com:8012/</a>
+matches</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Redirect to target url: /manage/v2 samlId(response):<id></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Set Cookie samlId:<id></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Saml Authenticate url:/manage/v2 samlId(Cookie):<id></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Saml Cached Response is valid for samlId:<id></td>
+</tr>
+<tr>
+<td>1</td>
+<td>Saml Response samlId:<id> Username:tuser1x Group: tuser1
+qconsole-user Valid from:<time> Valid until:<time></td>
+</tr>
+<tr>
+<td>1</td>
+<td>SAML signature is invalid</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Saml Response Error: signature is invalid</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Saml Cached Response is invalid</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Saml Response Error: cannot parse response</td>
+</tr>
+</tbody>
+</table>
+<p><strong>4 SAML error message(s)</strong>; the first is the one to
+start from. Quoted in Check results. Responses MarkLogic validated: 4;
+external authentication passes: 4.
+(<code>External authentication failed: user=</code> lines with no user
+name appear for the first request, before a session exists; they are
+normal.)</p>
+<h3 id="identity-in-the-assertion-from-the-trace-and-role-mapping">Identity
+in the assertion (from the trace) and role mapping</h3>
+<table>
+<thead>
+<tr>
+<th>Time</th>
+<th>NameID (Username)</th>
+<th>Group values</th>
+<th>Valid from / until</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2026-10-24 15:30:17.794</td>
+<td><code>tuser1x</code></td>
+<td><code>tuser1 qconsole-user</code></td>
+<td>2026-10-24T15:22:04Z / 2026-10-24T15:32:04Z</td>
+</tr>
+<tr>
+<td>2026-10-24 15:30:19.210</td>
+<td><code>tuser1</code></td>
+<td><code>tuser1 qconsole-user</code></td>
+<td>2026-10-24T15:22:04Z / 2026-10-24T15:32:04Z</td>
+</tr>
+<tr>
+<td>2026-10-24 15:32:01.974</td>
+<td><code>tuser1</code></td>
+<td><code>tuser1 qconsole-user</code></td>
+<td>2026-10-24T15:27:01Z / 2026-10-24T15:37:01Z</td>
+</tr>
+<tr>
+<td>2026-10-24 15:32:02.934</td>
+<td><code>tuser1</code></td>
+<td><code>tuser1 qconsole-user</code></td>
+<td>2026-10-24T15:27:01Z / 2026-10-24T15:37:01Z</td>
+</tr>
+<tr>
+<td>2026-10-24 15:32:03.397</td>
+<td><code>tuser1</code></td>
+<td><code>tuser1 qconsole-user</code></td>
+<td>2026-10-24T15:27:01Z / 2026-10-24T15:37:01Z</td>
+</tr>
+</tbody>
+</table>
+<p>With authorization <code>saml</code> the assertion&#39;s Group values are
+matched to roles&#39; external names (roles-external-names.json lists
+them).</p>
+<h2 id="not-collected">Not collected</h2>
+<p>Nothing was skipped.</p>
+<h2 id="check-results">Check results</h2>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th>Check</th>
+<th>Detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FAIL</strong></td>
+<td>SAML error, first at 2026-10-24 15:30:17.794 (1 time)</td>
+<td><code>SAML signature is invalid</code> - The signature does not
+verify with the certificate stored in
+<code>saml-idp-certificate-authority</code>: the IdP is signing with a
+different (rotated, or per-application) certificate, or the assertion
+was altered. Compare the stored certificate&#39;s SHA-1 with the IdP
+metadata and with the certificate embedded in the response.</td>
+</tr>
+<tr>
+<td><strong>FAIL</strong></td>
+<td>SAML error, first at 2026-10-24 15:30:17.794 (1 time)</td>
+<td><code>Saml Response Error: signature is invalid</code> - The
+signature does not verify with the certificate stored in
+<code>saml-idp-certificate-authority</code>: the IdP is signing with a
+different (rotated, or per-application) certificate, or the assertion
+was altered. Compare the stored certificate&#39;s SHA-1 with the IdP
+metadata and with the certificate embedded in the response.</td>
+</tr>
+<tr>
+<td><strong>FAIL</strong></td>
+<td>SAML error, first at 2026-10-24 15:30:18.264 (1 time)</td>
+<td><code>Saml Cached Response is invalid</code></td>
+</tr>
+<tr>
+<td><strong>FAIL</strong></td>
+<td>SAML error, first at 2026-10-24 15:32:03.859 (1 time)</td>
+<td><code>Saml Response Error: cannot parse response</code> - The value
+sent after <code>SAML token=</code> (or posted as SAMLResponse) is not a
+base64-encoded SAML Response XML. Check what the application sends
+(truncated, double-encoded, or not a SAML response).</td>
+</tr>
+<tr>
+<td><strong>INFO</strong></td>
+<td><code>Manage-Clone-SAML</code> saml-idp-certificate-authority issuer
+not stored</td>
+<td>#1 issuer <code>CN=authentik 2026.8.3</code> missing. Informational:
+a SAML login worked on a 12.1.0 test server (authentik) with only the
+IdP signing certificate stored, so MarkLogic does not need the issuer.
+Match the stored certificate against the IdP metadata instead</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td><code>Manage-Clone-SAML</code> saml-sp-certificate chain
+complete</td>
+<td>ends in a self-signed certificate (1 in bundle)</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>Manage-Clone-SAML: saml-entity-id = metadata entityID</td>
+<td>config
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code>
+/ metadata
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code></td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>Manage-Clone-SAML: saml-destination is a metadata SSO URL</td>
+<td>config
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</code>
+/ metadata <a href="https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/">https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</a>,
+<a href="https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/">https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</a></td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>Manage-Clone-SAML: stored IdP certificate is in the metadata</td>
+<td>stored 23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F /
+metadata
+23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>assertion Issuer = saml-entity-id</td>
+<td>config
+<code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code>
+/ assertion <a href="https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/">https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</a></td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>assertion Audience = saml-issuer (SP entity ID)</td>
+<td>config <code>https://ml1.example.com:8012</code> / assertion <a href="https://ml1.example.com:8012">https://ml1.example.com:8012</a></td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>assertion is signed</td>
+<td>MarkLogic requires a signed assertion (tested on 12.1.0); signed
+elements: Assertion</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>response signing cert = certificate stored in MarkLogic</td>
+<td>response 23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F
+/ MarkLogic
+23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>response signing cert is listed in the IdP metadata</td>
+<td>metadata lists 1 signing certificate(s)</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>assertion matches a MarkLogic external name</td>
+<td>NameID matches an external name (user tuser1); attribute
+<code>http://schemas.goauthentik.io/2021/02/saml/username</code> value
+<code>tuser1</code> matches (user tuser1); attribute
+<code>http://schemas.xmlsoap.org/claims/Group</code> value
+<code>qconsole-user</code> matches (role qconsole-user)</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>Group values of tuser1x map to MarkLogic roles</td>
+<td><code>qconsole-user</code> -&gt; qconsole-user</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td>Group values of tuser1 map to MarkLogic roles</td>
+<td><code>qconsole-user</code> -&gt; qconsole-user</td>
+</tr>
+</tbody>
+</table>
+<p>Only the properties named above were read. The SP private key,
+passwords and secrets are removed before saving.</p>
+</body>
+</html>

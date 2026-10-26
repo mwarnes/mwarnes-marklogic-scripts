@@ -13,3 +13,6 @@
 
 # KCS drafts (local only, not published)
 kcs/
+
+# ml-trace-events.py state file written in the current directory
+.ml-trace-events-state.json

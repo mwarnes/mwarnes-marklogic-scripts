@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.12.1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>SAML configuration gather (sample output)</title>
+  <style>
+
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+</style>
+  <style type="text/css">body{font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;line-height:1.45;color:#222}
+table{border-collapse:collapse;margin:1em 0;width:100%;font-size:.9em}
+th,td{border:1px solid #ccc;padding:.35em .6em;vertical-align:top;text-align:left}
+th{background:#f0f0f0}
+code{background:#f5f5f5;padding:0 .25em;word-break:break-word}
+h1,h2,h3{border-bottom:1px solid #eee;padding-bottom:.2em}
+</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">SAML configuration gather (sample output)</h1>
+</header>
+<h1 id="saml-configuration-gather">SAML configuration gather</h1>
+<p>Collected 2026-10-25 09:11 UTC from ml1.example.com:8002 as
+<code>admin</code>. Nothing was changed on the server.</p>
+<p><strong>4 part(s) were not collected</strong>; see the section &quot;Not
+collected&quot; near the end.</p>
+<p>MarkLogic version: 12.1.0 (cluster
+<code>ml1.example.com-cluster</code>) Hosts: ml1.example.com</p>
+<h2 id="external-security-objects">External security objects</h2>
+<h3 id="manage-clone-saml"><code>Manage-Clone-SAML</code></h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>authentication</td>
+<td><code>saml</code></td>
+</tr>
+<tr>
+<td>authorization</td>
+<td><code>saml</code></td>
+</tr>
+<tr>
+<td>cache-timeout</td>
+<td><code>60</code></td>
+</tr>
+<tr>
+<td>saml-entity-id</td>
+<td><code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/metadata/</code></td>
+</tr>
+<tr>
+<td>saml-destination</td>
+<td><code>https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/</code></td>
+</tr>
+<tr>
+<td>saml-issuer</td>
+<td><code>https://ml1.example.com:8012</code></td>
+</tr>
+<tr>
+<td>saml-assertion-host</td>
+<td><code>not set</code></td>
+</tr>
+<tr>
+<td>saml-authn-signature</td>
+<td><code>sha256</code></td>
+</tr>
+<tr>
+<td>saml-attribute-names</td>
+<td><code>none</code></td>
+</tr>
+<tr>
+<td>saml-sp-certificate</td>
+<td>set</td>
+</tr>
+<tr>
+<td>saml-sp-private-key</td>
+<td>set (value never collected)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="manage-clone-saml-saml-idp-certificate-authority"><code>Manage-Clone-SAML</code>
+saml-idp-certificate-authority</h4>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Subject</th>
+<th>Issuer</th>
+<th>Valid</th>
+<th>Expires in</th>
+<th>SHA-1</th>
+<th>Sig / key</th>
+<th>CA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>OU=Self-signed,O=authentik,CN=authentik Self-signed Certificate</code></td>
+<td><code>CN=authentik 2026.8.3</code></td>
+<td>2026-09-20 to 2027-09-21</td>
+<td>331 days</td>
+<td><code>23:5E:C2:D3:22:C7:DA:57:EB:4B:32:F8:6B:EE:D6:F1:02:39:98:8F</code></td>
+<td>sha256WithRSAEncryption / 4096</td>
+<td>n/a</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>#1 is issued by <code>CN=authentik 2026.8.3</code>, which is
+<strong>not in the stored bundle</strong>.</li>
+</ul>
+<h4 id="manage-clone-saml-saml-sp-certificate"><code>Manage-Clone-SAML</code>
+saml-sp-certificate</h4>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Subject</th>
+<th>Issuer</th>
+<th>Valid</th>
+<th>Expires in</th>
+<th>SHA-1</th>
+<th>Sig / key</th>
+<th>CA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>CN=ml1.example.com-manage-clone-saml-sp</code></td>
+<td><code>CN=ml1.example.com-manage-clone-saml-sp</code></td>
+<td>2026-10-24 to 2027-10-24</td>
+<td>364 days</td>
+<td><code>7C:67:3C:02:03:23:6D:04:6E:84:03:6E:1F:91:7E:B8:F7:94:84:5E</code></td>
+<td>sha256WithRSAEncryption / 2048</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>#1 is self-signed (it is its own trust anchor); signature check:
+ok</li>
+</ul>
+<h2 id="app-servers-using-these-objects">App servers using these
+objects</h2>
+<ul>
+<li><code>manage-clone</code> (group <code>Default</code>, port 8012):
+authentication <code>saml</code>, internal-security <code>True</code>,
+external-security <code>Manage-Clone-SAML</code>, TLS template
+<code>MarkLogic-Test</code></li>
+</ul>
+<h2 id="not-collected">Not collected</h2>
+<p>These parts were skipped because the input was not given or the data
+was not available. Everything else in this report was collected.</p>
+<table>
+<thead>
+<tr>
+<th>Not collected</th>
+<th>Why</th>
+<th>How to add it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User and role external names</td>
+<td>no --user-name given</td>
+<td>add --user-name <MarkLogic user the login maps to>; the external
+names of all roles were still collected</td>
+</tr>
+<tr>
+<td>IdP metadata comparison</td>
+<td>no --idp-metadata given</td>
+<td>add --idp-metadata &lt;file or https://... URL&gt;; the entity ID,
+destination and certificate stored in the profile are listed above</td>
+</tr>
+<tr>
+<td>SAML response comparison</td>
+<td>no --saml-response given</td>
+<td>add --saml-response <file> (a captured SAMLResponse or an
+authorization header line)</td>
+</tr>
+<tr>
+<td>ErrorLog, AccessLog and trace-event status</td>
+<td>--logs not given</td>
+<td>add --logs --start <UTC time shortly before the test> (switch the
+trace events on first with ml-trace-events.py, preset saml or
+oauth)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="check-results">Check results</h2>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th>Check</th>
+<th>Detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>INFO</strong></td>
+<td><code>Manage-Clone-SAML</code> saml-idp-certificate-authority issuer
+not stored</td>
+<td>#1 issuer <code>CN=authentik 2026.8.3</code> missing. Informational:
+a SAML login worked on a 12.1.0 test server (authentik) with only the
+IdP signing certificate stored, so MarkLogic does not need the issuer.
+Match the stored certificate against the IdP metadata instead</td>
+</tr>
+<tr>
+<td><strong>PASS</strong></td>
+<td><code>Manage-Clone-SAML</code> saml-sp-certificate chain
+complete</td>
+<td>ends in a self-signed certificate (1 in bundle)</td>
+</tr>
+</tbody>
+</table>
+<p>Only the properties named above were read. The SP private key,
+passwords and secrets are removed before saving.</p>
+</body>
+</html>

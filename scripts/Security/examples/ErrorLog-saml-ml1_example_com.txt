@@ -1,0 +1,48 @@
+# ErrorLog lines about SAML / external authentication from ml1.example.com, 2026-10-24T15:30:16Z to 2026-10-24T15:32:36Z UTC; long values removed
+2026-10-24 15:30:17.333 Info: [Event:id=SAML] Saml Authenticate url:/manage/v2 samlId(Cookie):
+2026-10-24 15:30:17.333 Info: [Event:id=SAML] Saml Cached Response not found for samlId:
+2026-10-24 15:30:17.333 Info: [Event:id=SAML] Saml Authn Request: <AuthnRequest xmlns="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="c12982247058576736485" Version="2.0" IssueInstant="2026-10-24T15:30:17Z" Destination="https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" AssertionConsumerServiceURL="https://ml1.example.com:8012/"><saml:Issuer>https://ml1.example.com:8012</saml:Issuer><NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified" AllowCreate="false"/></AuthnRequest>
+2026-10-24 15:30:17.333 Info: [Event:id=SAML] Saml Authn Signature uses sha256
+2026-10-24 15:30:17.334 Info: [Event:id=SAML] Saml Redirect to IDP: https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/?SAMLRequest=<removed>&SigAlg=http%3A%2F%2Fwww.w3.org%2F2001%2F04%2Fxmldsig-more%23rsa-sha256&Signature=<removed>
+2026-10-24 15:30:17.334 Info: [Event:id=External Authenticate] External authentication failed: user=
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Authenticate url:/ samlId(Cookie):
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response samlId:c18428046654201601519 Username:tuser1x Group: tuser1 qconsole-user  Valid from:2026-10-24T15:22:04Z Valid until:2026-10-24T15:32:04Z
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: status is Success
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: assertion count is 1
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: Issuer matches configured IdP
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: Audience matches SP entity ID
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: notOnOrAfter 2026-10-24T15:32:04Z is valid
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: NotBefore 2026-10-24T15:22:04Z is valid
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] SAML signature is invalid
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response Error: signature is invalid
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Response: recipient https://ml1.example.com:8012/ matches
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Redirect to target url: /manage/v2 samlId(response):c18428046654201601519
+2026-10-24 15:30:17.794 Info: [Event:id=External Authenticate] External authentication failed: user=
+2026-10-24 15:30:17.794 Info: [Event:id=SAML] Saml Set Cookie samlId:c18428046654201601519
+2026-10-24 15:30:18.264 Info: [Event:id=SAML] Saml Authenticate url:/manage/v2 samlId(Cookie):c18428046654201601519
+2026-10-24 15:30:18.264 Info: [Event:id=SAML] Saml Cached Response is invalid
+2026-10-24 15:30:18.264 Info: [Event:id=External Authenticate] External authentication failed: user=
+2026-10-24 15:30:18.741 Info: [Event:id=SAML] Saml Authenticate url:/manage/v2 samlId(Cookie):
+2026-10-24 15:30:18.741 Info: [Event:id=SAML] Saml Cached Response not found for samlId:
+2026-10-24 15:30:18.741 Info: [Event:id=SAML] Saml Authn Request: <AuthnRequest xmlns="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="c15446056295078742000" Version="2.0" IssueInstant="2026-10-24T15:30:18Z" Destination="https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" AssertionConsumerServiceURL="https://ml1.example.com:8012/"><saml:Issuer>https://ml1.example.com:8012</saml:Issuer><NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified" AllowCreate="false"/></AuthnRequest>
+2026-10-24 15:30:18.741 Info: [Event:id=SAML] Saml Authn Signature uses sha256
+2026-10-24 15:30:18.742 Info: [Event:id=SAML] Saml Redirect to IDP: https://idp.example.com:9443/application/saml/marklogic-manage-clone-saml/?SAMLRequest=<removed>&SigAlg=http%3A%2F%2Fwww.w3.org%2F2001%2F04%2Fxmldsig-more%23rsa-sha256&Signature=<removed>
+2026-10-24 15:30:18.742 Info: [Event:id=External Authenticate] External authentication failed: user=
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Authenticate url:/ samlId(Cookie):
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response samlId:c18428046654201601519 Username:tuser1 Group: tuser1 qconsole-user  Valid from:2026-10-24T15:22:04Z Valid until:2026-10-24T15:32:04Z
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: status is Success
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: assertion count is 1
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: Issuer matches configured IdP
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: Audience matches SP entity ID
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: notOnOrAfter 2026-10-24T15:32:04Z is valid
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: NotBefore 2026-10-24T15:22:04Z is valid
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: signature is valid
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: signed element matches assertion
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response: recipient https://ml1.example.com:8012/ matches
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Response is valid
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Redirect to target url: /manage/v2 samlId(response):c18428046654201601519
+2026-10-24 15:30:19.210 Info: [Event:id=External Authenticate] External authentication failed: user=
+2026-10-24 15:30:19.210 Info: [Event:id=SAML] Saml Set Cookie samlId:c18428046654201601519
+2026-10-24 15:30:19.677 Info: [Event:id=SAML] Saml Authenticate url:/manage/v2 samlId(Cookie):c18428046654201601519
+2026-10-24 15:30:19.677 Info: [Event:id=SAML] Saml Cached Response is valid for samlId:c18428046654201601519
+2026-10-24 15:30:19.677 Info: [Event:id=External Authenticate] ExternalSecurity[Manage-Clone-SAML] pass
