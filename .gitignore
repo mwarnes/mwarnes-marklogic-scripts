@@ -10,3 +10,6 @@
 *.env
 !*.env.example
 .DS_Store
+
+# KCS drafts (local only, not published)
+kcs/
