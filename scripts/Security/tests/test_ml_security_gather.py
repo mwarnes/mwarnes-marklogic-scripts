@@ -48,9 +48,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/manage/v2/hosts":
             return self.reply({"x": {"status-list-items": {"status-list-item": [{"nameref": "h1"}]}}})
         if p == "/manage/v2/external-security":
-            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "oa"}, {"nameref": "ld"}]},
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "oa"}, {"nameref": "ld"}] + ([{"nameref": "ob"}] if STATE.get("extra_oauth") else [])},
                                      "relations": {"relation": [{"nameref": "Security"}]}}})
-        if p == "/manage/v2/external-security/oa/properties":
+        if p in ("/manage/v2/external-security/oa/properties", "/manage/v2/external-security/ob/properties"):
             return self.reply({"external-security-name": "oa", "authentication": "oauth", "authorization": "oauth", "oauth-server": {
                 "oauth-flow-type": STATE["flow"], "oauth-vendor": "Other", "oauth-client-id": "client", "oauth-jwt-issuer-uri": ISS,
                 "oauth-jwks-uri": "http://127.0.0.1:%d/jwks" % PORT, "oauth-jwt-alg": "RS256",
@@ -191,6 +191,40 @@ class GatherTests(unittest.TestCase):
         for o in (out, out2):
             for f in Path(o).iterdir():
                 self.assertNotIn("SECRETVALUE", f.read_text(), f.name)
+
+    def test_authorization_code_and_secrets_of_a_token_request_are_removed(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        STATE["errlog_extra"] = ("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Communications] HTTP POST to: https://idp.example.com/token/ Client ID: c "
+                                 "Data: grant_type=authorization_code&redirect_uri=https%3a//ml.example.com&code_verifier=VERIFIER123&code=ONETIMECODE456&client_secret=CSECRET789\n")
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *win)
+        finally:
+            STATE.pop("errlog_extra", None)
+        text = "".join(f.read_text() for f in Path(out).glob("ErrorLog-*")) + s
+        for secret in ("VERIFIER123", "ONETIMECODE456", "CSECRET789"):
+            self.assertNotIn(secret, text)
+        self.assertIn("grant_type=authorization_code", text)
+
+    def test_a_token_with_several_oauth_profiles_is_listed_as_not_collected(self):
+        f = Path(self.tmp, "tok-multi")
+        f.write_text(self.jwt({"iss": ISS, "aud": "client", "exp": int(time.time()) + 600, "preferred_username": "alice", "groups": ["ml-readers"]}))
+        STATE["extra_oauth"] = True
+        try:
+            r, s, out = self.run_gather("oauth", "--token", str(f), "--no-probe")
+        finally:
+            STATE.pop("extra_oauth", None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("pass --external-security NAME", s)
+        self.assertRegex(s, r"\| Token comparison \| several OAuth profiles exist")
+
+    def test_identical_check_rows_are_shown_once(self):
+        STATE["extra_oauth"] = True
+        try:
+            r, s, out = self.run_gather("oauth", "--no-probe")
+        finally:
+            STATE.pop("extra_oauth", None)
+        rows = [l for l in s.splitlines() if l.startswith("| **")]
+        self.assertEqual(len(rows), len(set(rows)))
 
     def test_minimal_run_lists_what_was_not_collected(self):
         r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")

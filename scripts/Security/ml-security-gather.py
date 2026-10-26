@@ -496,6 +496,8 @@ HINTS = [
 def scrub(line):
     line = re.sub(r"((?:SAMLRequest|SAMLResponse|Signature|RelayState)=)[^&\s]+", r"\1<removed>", line)
     line = re.sub(r"(<(?:ds:)?(?:SignatureValue|DigestValue|X509Certificate)>)[^<]*", r"\1<removed>", line)
+    # one-time codes and secrets of a token-endpoint request (the OAuth Communications trace logs its form data)
+    line = re.sub(r"(?<![\w-])((?:code|code_verifier|client_secret|client_assertion|assertion|refresh_token|password)=)[^&\s]+", r"\1<removed>", line)
     # whole tokens: a JWT (header.payload.signature), and the token values of a token-endpoint response
     line = re.sub(r"eyJ[\w-]+\.eyJ[\w-]+\.[\w-]*", "<JWT removed>", line)
     line = re.sub(r'("(?:access_token|refresh_token|id_token)"\s*:\s*")[^"]*', r"\1<removed>", line)
@@ -1709,6 +1711,7 @@ def run_oauth(c):
             say("## Token check")
             say("")
             say("Several OAuth profiles exist; pass --external-security NAME so the token is compared with the right one.")
+            missing("Token comparison", "several OAuth profiles exist and none was chosen", "add --external-security <name> so the token is compared with the right profile")
         else:
             try:
                 analyse_token(a.token, cfg, jwks_doc, role_map, ext)
@@ -2195,6 +2198,7 @@ def run_saml(c):
                 say("## SAML response check")
                 say("")
                 say("Several SAML objects exist; pass --external-security NAME so the response is compared with the right one.")
+                missing("SAML response comparison", "several SAML profiles exist and none was chosen", "add --external-security <name> so the response is compared with the right profile")
             else:
                 analyse_response(xml_text, cfg, md, ext_names)
         except Exception as e:  # noqa: BLE001 - report, do not crash the whole gather
@@ -2243,7 +2247,8 @@ def finish(c):
     if CHECKS:
         say("| Result | Check | Detail |")
         say("|---|---|---|")
-        for r, n, d in sorted(CHECKS, key=lambda c: order[c[0]]):
+        # the same probe made for several profiles (one directory or IdP behind several) gives identical rows: show each once
+        for r, n, d in sorted(dict.fromkeys(CHECKS), key=lambda c: order[c[0]]):
             say("| **%s** | %s | %s |" % (r, n, d.replace("|", "\\|")))
     else:
         say("No checks could be run.")
