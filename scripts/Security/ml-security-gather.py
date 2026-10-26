@@ -554,7 +554,7 @@ def iso(d):
 
 
 def keep_error_lines(text, events=None, pattern=r"saml"):
-    events = events or SAML_EVENTS
+    events = SAML_EVENTS if events is None else events   # () is valid: the https area has no trace events
     kept, cur = [], None
     for raw in text.splitlines():
         m = TS_ERR.match(raw)
@@ -1212,16 +1212,22 @@ def load_trusted_cas(c):
     return c._trusted
 
 
+def dn_cn(dn):
+    """The CN value of an RFC 2253 name as printed by openssl (CN is first, not last, when O or C follow)."""
+    m = re.search(r"(?:^|,)CN=((?:[^,\\]|\\.)*)", dn or "")
+    return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
+
+
 def ml_trust_of_chain(c, ders):
     """Which certificate of a chain is in MarkLogic's trusted CA list (by key identifier or name)?"""
     cas = load_trusted_cas(c)
     for n, der in enumerate(ders):
         info = cert_info(der)
         for cn, ski, na in cas:
-            if (info.get("ski") and info["ski"] == ski) or (cn and info.get("subject", "").endswith("CN=" + cn)):
+            if (info.get("ski") and info["ski"] == ski) or (cn and dn_cn(info.get("subject")) == cn):
                 return cn
             # the last certificate sent is often issued by a root that is not sent: check its issuer too
-            if n == len(ders) - 1 and ((info.get("aki") and info["aki"] == ski) or (cn and info.get("issuer", "").endswith("CN=" + cn))):
+            if n == len(ders) - 1 and ((info.get("aki") and info["aki"] == ski) or (cn and dn_cn(info.get("issuer")) == cn)):
                 return cn + " (the issuer of the last certificate sent)"
     return None
 
@@ -1275,7 +1281,9 @@ OAUTH_HINTS = [
     (r"XDMP-OAUTH", "MarkLogic rejected the token or the OAuth flow; the message text says why."),
 ]
 LDAP_HINTS = [
-    (r"fail because authentication failure", "MarkLogic did not get a valid bind: wrong password or default user DN, or a bind method that does not support password login."),
+    (r"XDMP-LDAP-INVALID-CRED", "The directory refused a bind (error 49). It is either the search user (`ldap-default-user` and `ldap-password` of the profile) or the user who is signing in; the directory's access log shows which DN failed."),
+    (r"fail because authentication failure", "No successful login. With an XDMP-LDAP-INVALID-CRED line next to it a bind was refused (wrong password of the search user or of the user). Without one, no bind failed: the search found no entry, so check `ldap-base`, `ldap-attribute` and the exact user name."),
+    (r"ldapAuthenticate\(\) fail$", "The directory side gave no error. With authorization `internal` MarkLogic needs a user whose external name is the user's full DN (for example uid=jdoe,dc=example,dc=com); a short name does not match. See the user table of this report."),
     (r"fail because no LDAP user", "The bind worked but the search found no entry: check `ldap-base` and `ldap-attribute` with the exact user name."),
     (r"certificateAuthenticate\(\) fail because no user", "Certificate authentication found no MarkLogic user whose external name equals the DN shown."),
     (r"no external security is configured", "The app server needs an external security profile and none is selected."),
@@ -1293,7 +1301,7 @@ LOG_AREAS = {
                   pattern=r"oauth|jwt|jwks", error=r"XDMP-OAUTH|OAuth Status.*(fail|error|invalid|must|empty)|JWT validation failed|[Ee]rror:|failed",
                   hints=OAUTH_HINTS, trace_event="OAuth", preset="oauth"),
     "ldap": dict(events=("External Authenticate", "LDAP", "LDAP Search"), pattern=r"ldap",
-                 error=r"fail because|authentication failed|[Ee]rror:|failed|externalAuthenticate failed", hints=LDAP_HINTS,
+                 error=r"fail because|ldapAuthenticate\(\) fail$|authentication failed|[Ee]rror:|failed|externalAuthenticate failed", hints=LDAP_HINTS,
                  trace_event="External Authenticate", preset="ldap"),
     "https": dict(events=(), pattern=r"ssl|tls|certificate|handshake", error=r"[Ee]rror|fail|Failed|invalid|expired|unable|SVC-|Duplicate certificate subject",
                   hints=HTTPS_HINTS, trace_event=None, preset=None),

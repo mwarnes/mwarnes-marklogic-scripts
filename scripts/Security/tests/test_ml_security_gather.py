@@ -24,6 +24,8 @@ ERRLOG = """2026-10-25 10:00:01.200 Info: [Event:id=OAuth Status] JWT validation
 2026-10-25 10:00:02.100 Info: [Event:id=OAuth Status] OAuth JWT Issuer URI must be configured
 2026-10-25 10:00:04.000 Info: [Event:id=External Authenticate] ldapAuthenticate() fail because authentication failure
 2026-10-25 10:00:05.000 Info: [Event:id=External Authenticate] ldapAuthenticate() fail because no LDAP user
+2026-10-25 10:00:06.000 Error: LDAPClient: XDMP-LDAP-INVALID-CRED: ldap_simple_bind_s failed on ldap server ldap://ldap.example.com:389: Invalid credentials (49)
+2026-10-25 10:00:07.000 Info: [Event:id=External Authenticate] ExternalSecurity[ld] ldapAuthenticate() fail
 """
 ACCESS = '203.0.113.9 - - [25/Oct/2026:10:00:01 +0000] "GET /v1/x?q=secret HTTP/1.1" 401 209 - "node"\n'
 N = None
@@ -203,8 +205,9 @@ class GatherTests(unittest.TestCase):
         self.assertIn("restarted the authorization flow", s)
         self.assertIn("401 responses in the window", s)
         r, s, out = self.run_gather("ldap", "--external-security", "ld", *win)
-        self.assertIn("wrong password or default user DN", s)
-        self.assertIn("check `ldap-base`", s)
+        self.assertIn("The directory refused a bind", s)
+        self.assertIn("the search found no entry", s)
+        self.assertIn("needs a user whose external name is the user's full DN", s)
         for f in Path(out).glob("AccessLog-*"):
             self.assertNotIn("q=secret", f.read_text())
 
