@@ -208,6 +208,21 @@ class GatherTests(unittest.TestCase):
         for f in Path(out).glob("AccessLog-*"):
             self.assertNotIn("q=secret", f.read_text())
 
+    def test_start_and_end_accept_zone_offsets_and_bare_times_as_utc(self):
+        # the mock ErrorLog has lines at 10:00 UTC on 2026-10-25; 11:00+02:00 is 09:00 UTC, a bare 11:00:00 is taken as UTC
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe", "--logs",
+                                    "--start", "2026-10-25T11:00:00+02:00", "--end", "2026-10-25 11:00:00")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("## Logs (2026-10-25T09:00:00Z to 2026-10-25T11:00:00Z UTC)", s)
+        self.assertIn("`oauth-jwt-issuer-uri` is not set", s)
+
+    def test_a_start_that_is_not_a_time_is_rejected_with_the_accepted_formats(self):
+        for bad in ("yesterday", "14:30", "26/10/2026 14:30"):
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", "--logs", "--start", bad)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn("2026-01-15T09:00:00Z", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
     def test_list_names_ignore_related_objects(self):
         r, s, out = self.run_gather("oauth", "--no-probe")
         self.assertEqual(r.returncode, 0, r.stderr)

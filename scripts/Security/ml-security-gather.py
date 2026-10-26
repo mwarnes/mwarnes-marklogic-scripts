@@ -525,9 +525,23 @@ def load_role_map(api, out, errors):
     return rmap
 
 
+def utc_arg(text):
+    """A UTC time for --start / --end: ISO 8601. 'Z' or no zone mean UTC; an offset such as +02:00 is converted to UTC."""
+    t = str(text).strip()
+    try:
+        d = dt.datetime.fromisoformat(t[:-1] + "+00:00" if t[-1:] in ("Z", "z") else t)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "'%s' is not a time this script understands. Give a UTC time such as 2026-01-15T09:00:00Z. Also accepted: 2026-01-15T09:00Z, "
+            "2026-01-15 09:00:00, a date (2026-01-15, meaning 00:00), or a time with an offset such as 2026-01-15T10:00:00+01:00 (converted to UTC)" % text)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(dt.timezone.utc)
+
+
 def window(a):
-    end = parse_iso(a.end) if a.end else NOW
-    start = parse_iso(a.start) if a.start else end - dt.timedelta(minutes=a.minutes)
+    end = a.end if a.end else NOW
+    start = a.start if a.start else end - dt.timedelta(minutes=a.minutes)
     return start, end
 
 
@@ -2211,8 +2225,9 @@ def build_parser():
     logs = argparse.ArgumentParser(add_help=False)
     logs.add_argument("--logs", action="store_true", help="also read the ErrorLog (trace events) and the app server AccessLog for a time window")
     logs.add_argument("--minutes", type=int, default=60, help="with --logs: how far back to look (default 60)")
-    logs.add_argument("--start", help="with --logs: window start, UTC, e.g. 2026-01-15T09:00:00Z (overrides --minutes)")
-    logs.add_argument("--end", help="with --logs: window end, UTC (default: now)")
+    logs.add_argument("--start", type=utc_arg, metavar="UTC_TIME",
+                      help="with --logs: window start in UTC, e.g. 2026-01-15T09:00:00Z; a time without a zone means UTC and an offset such as +01:00 is converted (overrides --minutes)")
+    logs.add_argument("--end", type=utc_arg, metavar="UTC_TIME", help="with --logs: window end in UTC, same formats as --start (default: now)")
 
     prof = argparse.ArgumentParser(add_help=False)
     prof.add_argument("--external-security", metavar="NAME", help="name of the external security profile to read (default: every profile of this area)")
