@@ -98,7 +98,7 @@ Log times are written in each host's local time zone; the window above is UTC. I
 | 3 | Saml Cached Response not found for samlId: |
 | 3 | Saml Authn Request: <AuthnRequest xmlns= ... (XML/URL not shown) |
 | 3 | Saml Authn Signature uses sha256 |
-| 3 | Saml Redirect to IDP: https://auth.warne ... (XML/URL not shown) |
+| 3 | Saml Redirect to IDP: https://idp.example.com ... (XML/URL not shown) |
 | 3 | Saml Authenticate url:/ samlId(Cookie): |
 | 3 | Saml Response: recipient https://ml1.example.com:8012/ matches |
 | 3 | Saml Redirect to target url: /manage/v2 samlId(response):<id> |
