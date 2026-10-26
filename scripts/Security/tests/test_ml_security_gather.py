@@ -377,25 +377,22 @@ class SamlRuleTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return Path(out, "SUMMARY.md").read_text()
 
-    def test_authorization_internal_fails_on_11_3_7_and_later(self):
-        for v in ("11.3.7", "12.1.0"):
+    def test_authorization_internal_is_guidance_not_a_failure(self):
+        for v in ("11.3.7", "12.1.0", "11.2.0"):
             s = self.gather(version=v)
-            self.assertIn("| **FAIL** | sp: authorization is `saml`", s)
-            self.assertIn("BOTH authentication and authorization are `saml`", s)
-
-    def test_authorization_internal_is_only_a_warning_before_11_3_7(self):
-        s = self.gather(version="11.2.0")
-        self.assertIn("| **WARN** | sp: authorization is `saml`", s)
-        self.assertIn("older than 11.3.7", s)
+            self.assertIn("| **WARN** | sp: authorization is `saml`", s)
+            self.assertNotIn("| **FAIL** | sp: authorization is `saml`", s)
+            self.assertIn("this setting alone is not what leaves a login without roles", s)
 
     def test_authorization_saml_with_a_role_external_name_passes(self):
         s = self.gather(authz="saml")
         self.assertNotIn("authorization is `saml`", s)
         self.assertIn("| **PASS** | roles with external names exist", s)
 
-    def test_authorization_saml_without_any_role_external_name_fails(self):
-        s = self.gather(authz="saml", role_external=False)
-        self.assertIn("| **FAIL** | a role has an external name to receive SAML roles", s)
+    def test_no_role_external_name_fails_whatever_the_authorization_is(self):
+        for az in ("saml", "internal"):
+            s = self.gather(authz=az, role_external=False)
+            self.assertIn("| **FAIL** | a role has an external name to receive SAML roles", s)
 
 
 class UserOptionTests(unittest.TestCase):

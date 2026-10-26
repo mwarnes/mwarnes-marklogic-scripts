@@ -53,11 +53,11 @@ certificate. **Tested fix:** import the issuing CA certificate (the intermediate
 certificate authorities (`pki:insert-trusted-certificates` in the Security database); the port then sends leaf + intermediate at once.
 A bundle in the certificate import itself is rejected (`insert-host-certificates` takes one certificate, HTTP 400 `PKI-BADCERTIFICATE`).
 
-## SAML authorization rule and the user option
+## SAML roles and the user option
 
-On MarkLogic 11.3.7 and 12.1 SAML works only when **both `authentication` and `authorization` are `saml`**, with roles mapped
-through role external names (earlier releases accepted `internal`). Tested: with `internal` the login succeeds but the identity
-gets no roles (HTTP 403) whether a user's external name, an internal user's name, or both equal the NameID. The `saml` area
-reports a profile whose authorization is not `saml` as a failure (a warning before 11.3.7) and warns when no role has an
-external name. `--user` is required (it is not defaulted to `admin`); use any MarkLogic user with the admin role, or set
+The roles of a SAML login come from the assertion's Group values matched to the **external names of roles**; a MarkLogic
+user's roles and external names are not used. Tested on 11.3.7: with a matching role external name both authorization `saml`
+and `internal` granted the role; with none, both left the identity without roles (HTTP 403). MarkLogic reports that `internal`
+is no longer supported on 11.3.7 and 12.1 (not reproduced on 11.3.7, not retested on 12.1), so the `saml` area warns about it
+and fails when no role has an external name. `--user` is required (it is not defaulted to `admin`); use any MarkLogic user with the admin role, or set
 `MARKLOGIC_USER`.

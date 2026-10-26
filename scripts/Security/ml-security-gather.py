@@ -556,7 +556,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
     start, end = window(a)
     say("## Logs (%s to %s UTC)" % (iso(start), iso(end)))
     say("")
-    say("Log times are written in each host's local time zone; the window above is UTC. If a host is not on UTC, widen the window or pass --start/--end.")
+    say("Log times are written in each host's local time zone; the window above is UTC. If a host is not on UTC, widen the window or pass --start/--end. The ErrorLog does not say which app server a line belongs to: if several app servers use external security at the same time, reproduce one login at a time (the AccessLog is per app server).")
     say("")
     # trace events on the groups of the bound app servers
     for grp in sorted({g for _, g, _ in bound}):
@@ -674,7 +674,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
             say("| %s | `%s` | `%s` | %s / %s |" % (ts, user, grp, vf, vu))
         say("")
         auth_modes = {c.get("authorization") for c in cfgs.values()}
-        if role_map is not None and "saml" in auth_modes:
+        if role_map is not None:
             seen_g = set()
             for h, ts, sid, user, grp, vf, vu in resp_rows:
                 if (user, grp) in seen_g:
@@ -687,7 +687,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
                           "; ".join("`%s` -> %s" % (t, ", ".join(r)) for t, r in hit.items()))
                 else:
                     check("FAIL", "Group values of %s map to a MarkLogic role" % user,
-                          "none of `%s` equals the external-name of any role: with authorization `saml` the user gets no roles" % grp)
+                          "none of `%s` equals the external-name of any role, so the SAML identity gets no roles" % grp)
             say("With authorization `saml` the assertion's Group values are matched to roles' external names (roles-external-names.json lists them).")
             say("")
     if mapped_rows:
@@ -698,12 +698,9 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
         for h, port_srv, when, ext, tmp, roles in mapped_rows[-15:]:
             say("| %s | %s | `%s` | `%s` | %s |" % (when, port_srv, ext, tmp, ", ".join(roles) or "**none**"))
             if not roles:
-                if any(str(c.get("authorization")) != "saml" for c in cfgs.values()):
-                    why = ("Mapped to Temp User with empty Role(s). The profile's authorization is not `saml`: on MarkLogic 11.3.7 and 12.1 SAML needs both authentication and "
-                           "authorization set to `saml` and roles mapped through role external names. With `internal` the identity gets no roles (tested with a user external name, a "
-                           "same-named internal user, and both)")
-                else:
-                    why = "Mapped to Temp User with empty Role(s): a role-mapping problem (no role external-name matched the Group values). If the profile or the roles were changed after this time, the result may predate the change"
+                why = ("Mapped to Temp User with empty Role(s): no role has an external name equal to a Group value of the assertion. The MarkLogic user's own roles and external names "
+                       "are not used for a SAML login (tested on 11.3.7, with authorization `saml` and with `internal`). Give a role an external name equal to a Group value. "
+                       "If the profile or the roles were changed after this time, the result may predate the change")
                 check("FAIL", "%s was given roles at %s" % (ext, when), why)
         say("")
     if status_counts:
@@ -1296,7 +1293,7 @@ def analyse_logs_generic(c, area, bound):
     start, end = window(a)
     say("## Logs (%s to %s UTC)" % (iso(start), iso(end)))
     say("")
-    say("Log times are written in each host's local time zone; the window above is UTC. If a host is not on UTC, widen the window or pass --start/--end.")
+    say("Log times are written in each host's local time zone; the window above is UTC. If a host is not on UTC, widen the window or pass --start/--end. The ErrorLog does not say which app server a line belongs to: if several app servers use external security at the same time, reproduce one login at a time (the AccessLog is per app server).")
     say("")
     if cfgl["trace_event"]:
         for grp in sorted({b["group"] for b in bound} or {"Default"}):
@@ -1952,12 +1949,10 @@ def run_saml(c):
                 check("WARN", "%s: entity-id differs from issuer" % n, "saml-entity-id is the IdP, saml-issuer is MarkLogic (SP); they are normally different")
             az = str(cfg.get("authorization"))
             if az != "saml":
-                hard = version_tuple(c.version) >= (11, 3, 7)
-                check("FAIL" if hard else "WARN", "%s: authorization is `saml`" % n,
-                      "authentication is `saml` but authorization is `%s`. On MarkLogic 11.3.7 and 12.1 (security was hardened) SAML works only when BOTH authentication and "
-                      "authorization are `saml`: the roles then come from the assertion's Group values matched to the external names of roles. With `%s` the login succeeds but the "
-                      "identity gets no roles (HTTP 403); tested on 11.3.7 and 12.1.0. Set authorization to `saml` and give a role an external name equal to a Group value%s"
-                      % (az, az, "" if hard else ". This server is older than 11.3.7, where `internal` may still have worked"))
+                check("WARN", "%s: authorization is `saml`" % n,
+                      "authentication is `saml` but authorization is `%s`. Guidance: SAML on MarkLogic 11.3.7 and 12.1 should use authorization `saml` (reported: `internal` is no longer supported after the "
+                      "security hardening). In a test on 11.3.7 `internal` still granted roles when a role's external name equalled a Group value, so this setting alone is not what leaves a login "
+                      "without roles; set `saml` anyway and check the role external names" % az)
         infos = analyse_chain("`%s` saml-idp-certificate-authority" % n, cfg.get("saml-idp-certificate-authority") or "")
         cfg["_cert_sha1"] = [i["sha1"] for i in infos]
         if not infos:
@@ -2049,7 +2044,7 @@ def run_saml(c):
                     say("  - role `%s` external names: %s; inherits %s; privileges: %s" % (
                         r, role_cache[r][0] or "none", role_cache[r][1] or "none", ", ".join(role_priv.get(r, [])[:25]) or "none"))
         say("")
-        say("On MarkLogic 11.3.7 and 12.1 a SAML login needs authorization `saml`: the roles come from the assertion's Group values matched to the external names of roles. The user's own roles and external names shown above are NOT used for a SAML login (with authorization `internal` a user's external name, an internal user named like the NameID, or both gave the identity no roles; tested).")
+        say("The roles of a SAML login come from the assertion's Group values matched to the external names of roles (tested on 11.3.7 with authorization `saml` and with `internal`). The user's own roles and external names shown above are NOT used for a SAML login.")
         say("")
         ext_names = {"all": allmap}
 
@@ -2142,10 +2137,10 @@ def run_saml(c):
         role_map = load_role_map(api, out, errors)
     else:
         role_map = None
-    if role_map is not None and any(str(cf.get("authorization")) == "saml" for cf in cfgs.values()):
+    if role_map is not None and cfgs:
         if not role_map:
             check("FAIL", "a role has an external name to receive SAML roles",
-                  "no role has an external name, so a SAML login (authorization `saml`) can never be given a role: give a role an external name equal to a Group value of the assertion")
+                  "no role has an external name, so a SAML login can never be given a role: give a role an external name equal to a Group value of the assertion")
         else:
             check("PASS", "roles with external names exist", "%d external name(s): %s" % (len(role_map), ", ".join(sorted(role_map)[:6]) + (" ..." if len(role_map) > 6 else "")))
     if a.logs:
