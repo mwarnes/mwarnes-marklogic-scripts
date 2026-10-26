@@ -488,8 +488,8 @@ HINTS = [
     (r"status .* is not Success", "The IdP returned an error status instead of an assertion; check the IdP's log."),
     (r"cannot parse response", "The value sent after `SAML token=` (or posted as SAMLResponse) is not a base64-encoded SAML Response XML. Check what the application sends (truncated, double-encoded, or not a SAML response)."),
     (r"expected 1 assertion", "The response held no (or several) assertions."),
-    (r"Issuer", "The assertion Issuer must equal `saml-entity-id` (the IdP entity ID)."),
-    (r"NotBefore|notOnOrAfter|expired", "Validity window problem: check clock synchronisation (NTP) on the MarkLogic hosts and the IdP."),
+    (r"Issuer .* does not match configured IdP|Issuer", "The assertion Issuer must equal `saml-entity-id` (the IdP entity ID) exactly, including a trailing slash. Copy the Issuer from this line or from the IdP metadata `entityID`; for Microsoft Entra it is `https://sts.windows.net/<tenant-id>/` (the Microsoft Entra Identifier), not a value made up in the MarkLogic namespace. A valid signature and audience do not make up for it: the login is still refused (HTTP 401)."),
+    (r"Expired|NotBefore|notOnOrAfter|expired", "Validity window problem: check clock synchronisation (NTP) on the MarkLogic hosts and the IdP. If the same samlId repeats minutes after the first attempt, the browser is resubmitting an old response: look at the first attempt for the real reason."),
 ]
 
 
