@@ -736,6 +736,7 @@ class CertificateAreaTests(unittest.TestCase):
     def test_tls_alerts_are_explained_because_nothing_is_logged(self):
         r, s = self.gather()
         self.assertIn("48 unknown ca", s)
+        self.assertIn("116 certificate required (TLS 1.3, MarkLogic 12)", s)
         self.assertIn("nothing is written to the ErrorLog or AccessLog", s)
 
     LOGWIN = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
