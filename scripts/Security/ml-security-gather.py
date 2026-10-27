@@ -2036,7 +2036,7 @@ def run_https(c):
 
 # ---------------------------------------------------------------- certificate (client certificate authentication)
 CERT_ALERTS = [
-    ("40 handshake failure", "the client sent no certificate (or none the server accepts) while one is required"),
+    ("40 handshake failure (TLS 1.2, MarkLogic 11) / 116 certificate required (TLS 1.3, MarkLogic 12)", "the client sent no certificate (or none the server accepts) while one is required"),
     ("42 bad certificate", "a certificate in the chain is not yet valid (or otherwise unusable)"),
     ("43 unsupported certificate", "the extended key usage does not allow client authentication (for example serverAuth only)"),
     ("45 certificate expired", "the client certificate or one of its CAs has expired"),
