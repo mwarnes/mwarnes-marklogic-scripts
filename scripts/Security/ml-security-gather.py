@@ -1437,6 +1437,11 @@ def analyse_logs_generic(c, area, bound):
                 check("INFO", "401 responses in the window", "%d: authentication was refused; see the error lines in the ErrorLog" % n401)
             if n403:
                 check("INFO", "403 responses in the window", "%d: the user authenticated but lacks a role or privilege for the URL (authorization failures are in the AccessLog, not the ErrorLog)" % n403)
+            if n403 and area == "ldap" and any(re.search(r"ldapAuthenticate\(\) pass", b) for _, _, _, b in all_msgs):
+                check("WARN", "LDAP login passed, then the request was refused (403)",
+                      "%d x 403 after `ldapAuthenticate() pass`: the user authenticated but has no role for the URL, and the ErrorLog does not say why. With authorization `ldap` the "
+                      "user's memberOf group DNs must equal a role external name exactly (see the group DN check above); read them from the directory, for example "
+                      "`ldapsearch -x -D <bind DN> -W -b <base> '(<ldap-attribute>=<user>)' memberOf`. With `internal`, the roles of the matching MarkLogic user decide" % n403)
             say("")
 
 
@@ -1729,6 +1734,41 @@ def run_oauth(c):
 
 
 # ---------------------------------------------------------------- LDAP
+def dn_norm(s):
+    """A DN for comparison: no blanks around = and ',', lower case."""
+    return re.sub(r"\s*,\s*", ",", re.sub(r"\s*=\s*", "=", str(s).strip())).lower()
+
+
+def looks_like_dn(s):
+    return bool(re.match(r"^[a-z][\w-]*=[^,=]+(,[a-z][\w-]*=[^,=]+)+$", dn_norm(s)))
+
+
+def check_group_dns(n, base, role_map):
+    """Authorization ldap: role external names must equal the user's group DNs. The directory is not read, but a role external
+    name that is a DN outside ldap-base (a typo in the suffix) can be found from the MarkLogic side."""
+    nb = dn_norm(base)
+    dns = [e for e in role_map if looks_like_dn(e)]
+    under = [e for e in dns if dn_norm(e) == nb or dn_norm(e).endswith("," + nb)]
+    outside = [e for e in dns if e not in under]
+    fmt = lambda es: "; ".join("`%s` (role %s)" % (e, ", ".join(role_map[e])) for e in es)
+    if under:
+        check("PASS", "%s: a role external name is a group DN under ldap-base" % n, fmt(under))
+    else:
+        check("WARN", "%s: no role external name is a group DN under ldap-base `%s`" % (n, base),
+              ("authorization is `ldap`, so a login only gets roles whose external name equals one of the user's memberOf DNs, and none of the roles' external names is a DN under the base. "
+               + ("DN-shaped external names outside the base: %s. Group DNs normally sit under the same base: check the suffix. These may also belong to another directory (external names are cluster-wide)" % fmt(outside) if outside
+                  else "No role external name looks like a DN at all: give a role the full DN of a group the user is a member of, for example cn=<group>,<base>")))
+    # external names are cluster-wide: a DN that shares part of the base (same domain, other suffix) is a likely typo, any other DN probably belongs to another directory
+    rdns = lambda d: set(dn_norm(d).split(","))
+    near = [e for e in outside if rdns(e) & rdns(base)]
+    far = [e for e in outside if e not in near]
+    if near and under:
+        check("WARN", "%s: a role external name is a group DN that looks like ldap-base `%s` with another suffix" % (n, base),
+              "%s. If this role is meant to receive the groups of this directory, its external name must end in the base exactly" % fmt(near))
+    if far and under:
+        check("INFO", "%s: other role external names are DNs outside ldap-base" % n, fmt(far) + ". Harmless if they belong to another directory (external names are cluster-wide)")
+
+
 def run_ldap(c):
     a = c.a
     say("## LDAP external security profiles")
@@ -1744,8 +1784,9 @@ def run_ldap(c):
         for k in ("ldap-server-uri", "ldap-base", "ldap-attribute"):
             if not first(props, k):
                 check("FAIL", "%s: %s is set" % (n, k), "empty")
-        if str(first(props, "authorization")) == "ldap" and not any(first(props, k) for k in ("ldap-memberof-attribute", "ldap-member-attribute", "ldap-memberof")):
-            check("INFO", "%s: group lookup attributes" % n, "authorization is `ldap`; no memberOf/member lookup attribute was found in the settings")
+        if str(first(props, "authorization")) == "ldap":
+            say("Authorization `ldap`: after the bind MarkLogic reads the user's `memberOf` group DNs from the directory and gives the roles whose external name equals one of them (the directory side is not read by this script).")
+            say("")
         for k, v in walk(props):
             if isinstance(v, str) and "BEGIN CERTIFICATE" in v:
                 analyse_chain("`%s` %s" % (n, k), v)
@@ -1795,6 +1836,10 @@ def run_ldap(c):
     role_map = None
     if profiles and any(str(first(p, "authorization")) == "ldap" for p in profiles.values()):
         role_map = load_role_map(c.api, c.out, c.errors)
+    if role_map is not None:
+        for n, props in profiles.items():
+            if str(first(props, "authorization")) == "ldap" and first(props, "ldap-base"):
+                check_group_dns(n, first(props, "ldap-base"), role_map)
     describe_users(c, "With authorization `internal`, the LDAP user is matched to a MarkLogic user's external name; with `ldap`, the user's group DNs are matched to the external names of roles.")
     if a.logs:
         analyse_logs_generic(c, "ldap", bound)
