@@ -43,6 +43,14 @@ selected) leaves **nothing** in the ErrorLog or AccessLog, so the cause comes fr
 Only a certificate that passes TLS but maps to no user (`certificateAuthenticate() fail because no user`) and a successful login are logged (trace event External Authenticate:
 `ml-trace-events.py enable --preset certificate`). The report lists the TLS alerts and the client-side command that shows them.
 
+**Authorization `ldap`.** When the external security profile has authorization `ldap`, MarkLogic does not look for a user whose external name equals the DN: it binds as the
+search account and does a **base-scope search whose base is the certificate's subject DN as stored** (the directory's own DN order: most specific first), reads the attribute named in
+`ldap-attribute`, and maps the user's `memberOf` groups to role external names. A certificate whose DN is stored general-first (`DC=com,DC=example,...`, typical of enterprise CAs)
+is therefore searched as is and fails with `certificateAuthenticate() fail because unknown user, dn <DN>`. The report shows the DN as MarkLogic uses it and reversed, judges it
+against `ldap-base`, gives the `ldapsearch` command to run against the directory (the script itself does not query it and never prints the search account's password), checks the group DNs
+against the roles' external names, and explains that four causes write the same `unknown user` line (reversed or wrong DN, no such entry, an attribute the entry lacks, a search account that
+cannot read the entry), which only the directory's access log tells apart. Switch on the trace events External Authenticate, LDAP and LDAP Search for the log part.
+
 Companion for the logs: `ml-trace-events.py enable|disable|status --preset saml|oauth|ldap` (in this folder, next to
 `ml-security-gather.py`) switches the trace events on before the test and off afterwards. Run both from this folder.
 
