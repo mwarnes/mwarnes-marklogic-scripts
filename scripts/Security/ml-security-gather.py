@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect and sanity-check the security configuration of a MarkLogic cluster for a support case.
 
-  ml-security-gather.py AREA [options]        AREA is one of: saml, oauth, ldap, https
+  ml-security-gather.py AREA [options]        AREA is one of: saml, oauth, ldap, https, certificate
   ml-security-gather.py AREA --help           the options and examples of one area
 
 Areas
@@ -10,6 +10,7 @@ Areas
           document and JWKS, IdP TLS chain and trust, captured access token (signature, issuer, claims)
   ldap    LDAP external security profile: settings, certificates, TLS of the directory server, user/role external names
   https   HTTPS app server: TLS settings, certificate template, the certificate chain the port really serves, protocols
+  certificate   client certificate authentication: selected client CAs, issuer verification, the client certificate, DN to user mapping
 
 Read-only. Uses the Management API (port 8002) with curl and openssl; python3 standard library only. Run it as a MarkLogic
 user with the admin role: the user `admin` or any other administrator account (--user NAME, or MARKLOGIC_USER). Works on
@@ -237,8 +238,19 @@ def cert_info(der):
             info["ski"] = lines[n + 1].strip().upper()
         if "X509v3 Authority Key Identifier" in line and n + 1 < len(lines):
             info["aki"] = lines[n + 1].strip().replace("keyid:", "").upper()
+        if "X509v3 Extended Key Usage" in line and n + 1 < len(lines):
+            info["eku"] = [x.strip() for x in lines[n + 1].split(",") if x.strip()]
+        if "X509v3 Key Usage" in line and n + 1 < len(lines):
+            info["ku"] = [x.strip() for x in lines[n + 1].split(",") if x.strip()]
     info["self_signed"] = info.get("subject") == info.get("issuer")
     return info
+
+
+def dn_stored_order(rfc2253):
+    """A subject DN in the order stored in the certificate, comma separated without blanks: openssl's RFC 2253 output (the
+    `subject` of cert_info) lists the attributes in reverse. The certificate labs show that MarkLogic logs and compares a DN
+    in the stored order: a certificate stored CN, OU is logged as CN=...,OU=... (verified only for such certificates)."""
+    return ",".join(reversed(re.split(r"(?<!\\),", rfc2253 or "")))
 
 
 def verify_signed_by(der, issuer_der):
@@ -821,7 +833,7 @@ def setup(a, p, area):
     c._trusted = None
     c._certs = None
     c.probed = set()
-    say("# %s configuration gather" % {"saml": "SAML", "oauth": "OAuth", "ldap": "LDAP", "https": "HTTPS app server"}[area])
+    say("# %s configuration gather" % {"saml": "SAML", "oauth": "OAuth", "ldap": "LDAP", "https": "HTTPS app server", "certificate": "Client certificate authentication"}[area])
     say("")
     say("Collected %s UTC from %s:%s as `%s`. Nothing was changed on the server." % (NOW.strftime("%Y-%m-%d %H:%M"), a.host, a.port, a.user))
     say("")
@@ -1145,6 +1157,12 @@ def duplicates_report(c):
 
 
 # ---------------------------------------------------------------- TLS probing
+def parse_ca_names(txt):
+    """The CA names a server lists in its certificate request ("Acceptable client certificate CA names" of openssl s_client)."""
+    m = re.search(r"Acceptable client certificate CA names\n(.*?)(?:\nRequested Signature Algorithms|\nClient Certificate Types|\n---|\Z)", txt, re.S)
+    return [x.strip() for x in m.group(1).splitlines() if x.strip()] if m else []
+
+
 def tls_probe(host, port, starttls=None, cafile=None, timeout=20):
     """Handshake with openssl s_client and return the chain presented, the negotiated protocol and cipher."""
     cmd = ["openssl", "s_client", "-connect", "%s:%s" % (host, port), "-showcerts"]
@@ -1170,6 +1188,7 @@ def tls_probe(host, port, starttls=None, cafile=None, timeout=20):
     if res["cipher"] in ("0000", "(NONE)"):
         res["cipher"], res["protocol"] = None, None
     res["client_cert_requested"] = ("Acceptable client certificate CA names" in txt) and "No client certificate CA names sent" not in txt
+    res["ca_names"] = parse_ca_names(txt)
     if not res["certs"]:
         m = re.search(r"(connect:errno=\d+|Connection refused|getaddrinfo.*|timed out|errno=\d+)", txt)
         if m:
@@ -1298,6 +1317,13 @@ HTTPS_HINTS = [
     (r"expired", "A certificate has expired."),
     (r"no shared cipher|handshake failure|wrong version number|protocol version", "Protocol or cipher mismatch between client and app server (check the app server's TLS settings)."),
 ]
+CERT_HINTS = [
+    (r"certificateAuthenticate\(\) fail because no user", "TLS accepted the certificate, but no MarkLogic user has an external name equal to the full subject DN shown in `dn=`. MarkLogic compares the whole DN as it logs it (CN first, comma, no space); a user whose external name is only the CN does not match. Give a user that exact DN as external name (the certificate section of this report lists near-misses)."),
+    (r"fail because no client certificate", "The client sent no certificate although the app server needs one."),
+    (r"no external security is configured", "The app server has no external security profile: create a profile with authentication `certificate` (authorization `internal`) and select it on the app server."),
+    (r"Duplicate certificate subject", "Two certificates in the Security database share a subject; see the table of duplicate subjects in this report. It appeared after client certificate authorities were selected in the lab tests; usually harmless."),
+    (r"certificateAuthenticate", "The certificate login failed after the TLS handshake; the message and the dn it shows say which certificate was presented."),
+]
 LOG_AREAS = {
     "oauth": dict(events=("OAuth", "OAuth Status", "OAuth Communications", "OAuth JSON Processing", "External Authenticate"),
                   pattern=r"oauth|jwt|jwks", error=r"XDMP-OAUTH|OAuth Status.*(fail|error|invalid|must|empty)|JWT validation failed|[Ee]rror:|failed",
@@ -1305,6 +1331,9 @@ LOG_AREAS = {
     "ldap": dict(events=("External Authenticate", "LDAP", "LDAP Search"), pattern=r"ldap",
                  error=r"fail because|ldapAuthenticate\(\) fail$|authentication failed|[Ee]rror:|failed|externalAuthenticate failed", hints=LDAP_HINTS,
                  trace_event="External Authenticate", preset="ldap"),
+    "certificate": dict(events=("External Authenticate",), pattern=r"client certificate|certificateAuthenticate|Duplicate certificate subject",
+                        error=r"fail because|External authentication failed|[Ee]rror|externalAuthenticate failed|Duplicate certificate subject",
+                        hints=CERT_HINTS, trace_event="External Authenticate", preset="certificate"),
     "https": dict(events=(), pattern=r"ssl|tls|certificate|handshake", error=r"[Ee]rror|fail|Failed|invalid|expired|unable|SVC-|Duplicate certificate subject",
                   hints=HTTPS_HINTS, trace_event=None, preset=None),
 }
@@ -1372,7 +1401,12 @@ def analyse_logs_generic(c, area, bound):
         for ts, level, msg in kept:
             all_msgs.append((h, ts, level, msg))
     say("")
-    if not all_msgs:
+    if not all_msgs and area == "certificate":
+        say("No relevant lines in the window.")
+        check("INFO", "no certificate login lines in the ErrorLog window",
+              "expected when the TLS handshake itself rejected the certificate (expired, wrong usage, issuing CA not selected, no certificate): that writes nothing to the logs, see the TLS alert table. "
+              "If the client should have passed TLS, check that the trace event External Authenticate is on (see above) and the time window")
+    elif not all_msgs:
         say("No relevant lines in the window.")
         check("WARN", "%s lines found in the ErrorLog window" % area.upper(), "none: trace events off, no attempt in the window, or a time-zone offset")
     else:
@@ -2000,6 +2034,312 @@ def run_https(c):
         missing("ErrorLog TLS lines", "--logs not given", "add --logs --start <UTC time shortly before the test>")
 
 
+# ---------------------------------------------------------------- certificate (client certificate authentication)
+CERT_ALERTS = [
+    ("40 handshake failure", "the client sent no certificate (or none the server accepts) while one is required"),
+    ("42 bad certificate", "a certificate in the chain is not yet valid (or otherwise unusable)"),
+    ("43 unsupported certificate", "the extended key usage does not allow client authentication (for example serverAuth only)"),
+    ("45 certificate expired", "the client certificate or one of its CAs has expired"),
+    ("48 unknown ca", "the issuing CA is not among the client certificate authorities selected for the app server"),
+]
+
+
+def dn_key(dn):
+    """A DN as a set of RDNs: blanks, case and attribute order do not matter."""
+    return frozenset(x for x in dn_norm(dn).split(",") if x)
+
+
+def load_user_external_names(c):
+    """external name -> [MarkLogic users], from every user's properties (the certificate DN is matched to these)."""
+    data, err = c.api.get("/manage/v2/users?format=json")
+    if err:
+        c.errors.append("/manage/v2/users: " + err)
+        return None
+    names = list_names(data)
+    if len(names) > 3000:
+        c.errors.append("users: %d users, only the first 3000 were read" % len(names))
+        names = names[:3000]
+    umap = {}
+
+    def read_user(n):
+        up, err = c.api.get("/manage/v2/users/%s/properties?format=json" % q(n))
+        return n, ([] if err else [str(x) for x in find_all(up, "external-name")])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        for n, ens in pool.map(read_user, names):
+            for en in ens:
+                umap.setdefault(en, []).append(n)
+    with open(os.path.join(c.out, "users-external-names.json"), "w") as f:
+        json.dump(umap, f, indent=2)
+    return umap
+
+
+def check_issuer_selection(c, nm, leaf, pool, sel, verification):
+    """Is the issuer of the client certificate selected for the app server, and (verification false) every CA up to the root?"""
+    in_sel = lambda i: any(dn_key(s["subject"]) == dn_key(i["subject"]) for s in sel)
+    chain, cur, seen = [], leaf, set()
+    while not cur.get("self_signed") and len(chain) < 6:
+        nxt = next((i for i in pool if i is not leaf and i["sha1"] not in seen and dn_key(i["subject"]) == dn_key(cur.get("issuer"))
+                    and (not cur.get("aki") or not i.get("ski") or cur["aki"] == i["ski"])), None)
+        if not nxt:
+            break
+        chain.append(nxt)
+        seen.add(nxt["sha1"])
+        cur = nxt
+    sels = ", ".join("`%s`" % s["subject"] for s in sel) or "none"
+    issuer_selected = any(dn_key(s["subject"]) == dn_key(leaf.get("issuer")) for s in sel)
+    if not issuer_selected:
+        trusted = any((cn and dn_cn(leaf.get("issuer")) == cn) or (leaf.get("aki") and leaf["aki"] == ski) for cn, ski, na in load_trusted_cas(c))
+        higher = [i for i in chain if in_sel(i)]
+        why = ("the issuer `%s` is not among the client certificate authorities selected for this app server (selected: %s). The server rejects the handshake with TLS alert 48 (unknown ca) and writes nothing to the logs. " % (leaf.get("issuer"), sels))
+        if higher:
+            why += "A CA higher in the chain (`%s`) is selected, but the CA that signed the certificate must be selected itself. " % higher[0]["subject"]
+        why += ("The issuer is in MarkLogic's trusted certificate authorities, but trusted is not the same as selected: add it to `ssl-client-certificate-authority` of the app server." if trusted
+                else "The issuer is not in MarkLogic's trusted certificate authorities either: import it there, then select it for the app server.")
+        check("FAIL", "%s: client certificate issuer is a selected client CA" % nm, why)
+        return
+    if verification:
+        check("PASS", "%s: client certificate issuer is a selected client CA" % nm,
+              "`%s` is selected; with ssl-client-issuer-authority-verification true the issuing CA alone is enough" % leaf.get("issuer"))
+        return
+    if not chain:
+        check("WARN", "%s: client certificate issuer is a selected client CA" % nm,
+              "a selected CA has the name `%s` but its key identifier differs from the one in the client certificate (a re-issued CA with a new key?): the certificate may be rejected" % leaf.get("issuer"))
+        return
+    top = chain[-1]
+    missing_dn = top.get("issuer") if not top.get("self_signed") else None
+    unselected = [i["subject"] for i in chain if not in_sel(i)]
+    if unselected or missing_dn:
+        names = ", ".join("`%s`" % u for u in unselected + ([missing_dn] if missing_dn else []))
+        check("FAIL", "%s: every CA up to the root is selected (issuer verification is false)" % nm,
+              "the issuing CA `%s` is selected but %s is not. With ssl-client-issuer-authority-verification false the whole chain up to the root must be selected: the server "
+              "rejects the handshake with TLS alert 48 (unknown ca) and logs nothing. Select the missing CA, or set the flag to true so that the issuing CA alone is enough" % (leaf.get("issuer"), names))
+    else:
+        check("PASS", "%s: every CA up to the root is selected (issuer verification is false)" % nm, "the chain of the client certificate ends in a selected root")
+
+
+def check_client_cert(c, a, servers):
+    """Checks of a public client certificate (never a key): validity, usage, DN as MarkLogic reads it, issuer selection, user mapping."""
+    say("## Client certificate check (`%s`)" % os.path.basename(a.client_cert))
+    say("")
+    pem = open(a.client_cert, encoding="utf-8", errors="replace").read()
+    if PRIV_RE.search(pem):
+        sys.exit("ERROR: %s contains a private key. Give the public certificate only (the PEM with BEGIN CERTIFICATE); never send a key." % a.client_cert)
+    chain_pem = ""
+    if a.client_chain:
+        chain_pem = open(a.client_chain, encoding="utf-8", errors="replace").read()
+        if PRIV_RE.search(chain_pem):
+            sys.exit("ERROR: %s contains a private key. Give public certificates only." % a.client_chain)
+    infos = analyse_chain("client certificate", "".join(der_to_pem(d) for d in split_certs(pem) + split_certs(chain_pem)),
+                          issuer_note="Informational: the issuing certificate was not supplied. Add --client-chain <intermediate and root PEM> to let the report check signatures; "
+                                      "the issuer is still compared with the selected client CAs by name")
+    if not infos:
+        return
+    leaf = infos[0]
+    if leaf.get("not_after") and leaf["not_after"] < NOW:
+        check("FAIL", "client certificate is within its validity period",
+              "expired %s: the server rejects it with TLS alert 45 (certificate expired) and logs nothing, whatever ssl-client-issuer-authority-verification says. Replace the certificate" % fmt_dt(leaf["not_after"]))
+    elif leaf.get("not_before") and leaf["not_before"] > NOW:
+        check("FAIL", "client certificate is within its validity period",
+              "valid from %s: the server rejects it with TLS alert 42 (bad certificate) until then, and logs nothing. Check the clock of the issuing CA and of the MarkLogic host" % fmt_dt(leaf["not_before"]))
+    eku, ku = leaf.get("eku"), leaf.get("ku")
+    if eku is None:
+        check("INFO", "client certificate: extended key usage", "none set: the certificate is not restricted to one purpose")
+    elif "TLS Web Client Authentication" in eku or "Any Extended Key Usage" in eku:
+        check("PASS", "client certificate: extended key usage allows client authentication", ", ".join(eku))
+    else:
+        check("FAIL", "client certificate: extended key usage allows client authentication",
+              "has %s but not clientAuth (TLS Web Client Authentication). The server rejects it with TLS alert 43 (unsupported certificate) and logs nothing. Issue a certificate with the clientAuth usage" % ", ".join(eku))
+    if ku and "Digital Signature" not in ku:
+        check("WARN", "client certificate: key usage", "digitalSignature is missing (has %s): TLS client authentication signs with the key" % ", ".join(ku))
+    dn = dn_stored_order(leaf.get("subject", ""))
+    say("- Subject DN as MarkLogic logs and compares it (the order stored in the certificate, comma, no space): `%s`" % dn)
+    if dn_norm(dn) != dn_norm(leaf.get("subject", "")):
+        say("- The same DN in RFC 2253 order (openssl reverses it): `%s`" % leaf.get("subject"))
+    say("- Issuer DN: `%s`" % leaf.get("issuer"))
+    say("")
+    pool = [i for i in infos]
+    for nm, grp, sp in servers:
+        pems = [p for p in find_all(sp, "ssl-client-certificate-pem") if isinstance(p, str)]
+        sel = [cert_info(d) for p in pems for d in split_certs(p)]
+        if not sel:
+            continue
+        check_issuer_selection(c, nm, leaf, pool + sel, sel, str(first(sp, "ssl-client-issuer-authority-verification")).lower() == "true")
+    umap = load_user_external_names(c)
+    if umap is None:
+        return
+    say("### Mapping the subject DN to a MarkLogic user")
+    say("")
+    users = umap.get(dn)
+    if users:
+        roles = []
+        for u in users:
+            up = c.fetch("/manage/v2/users/%s/properties?format=json" % q(u), "user-%s.json" % slug(u))
+            roles += [str(x) for x in find_all(up or {}, "role")]
+        say("- `%s` is the external name of user(s) %s; roles: %s" % (dn, ", ".join("`%s`" % u for u in users), ", ".join(sorted(set(roles))) or "none"))
+        check("PASS", "client certificate DN is the external name of a MarkLogic user", "`%s` -> %s (roles: %s)" % (dn, ", ".join(users), ", ".join(sorted(set(roles))) or "none"))
+        if not roles:
+            check("WARN", "the mapped user has roles", "user(s) %s have no roles: the login succeeds and the request is then refused (403)" % ", ".join(users))
+    else:
+        near = [(en, us) for en, us in umap.items() if dn_key(en) == dn_key(dn)]
+        cn = dn_cn(dn)
+        cn_only = [(en, us) for en, us in umap.items() if cn and en == cn]
+        like = [(en, us) for en, us in umap.items() if cn and cn in en and en != dn and (en, us) not in near and (en, us) not in cn_only][:5]
+        if near:
+            check("WARN", "client certificate DN matches an external name only after normalising",
+                  "%s: same attributes but another case, spacing or order. MarkLogic compares the DN exactly as it logs it (`%s`): make the external name identical" % (
+                      "; ".join("`%s` (user %s)" % (en, ", ".join(us)) for en, us in near), dn))
+        elif cn_only:
+            check("FAIL", "client certificate DN is the external name of a MarkLogic user",
+                  "user(s) %s have the external name `%s`, which is only the CN. MarkLogic maps by the FULL subject DN, so the login fails with `certificateAuthenticate() fail because no user`. "
+                  "Set the external name to `%s`" % (", ".join(sum([us for _, us in cn_only], [])), cn, dn))
+        else:
+            check("FAIL", "client certificate DN is the external name of a MarkLogic user",
+                  "no user has the external name `%s`: TLS accepts the certificate, then the login fails with `certificateAuthenticate() fail because no user` (HTTP 401). "
+                  "Create a user, or add this DN as an external name of one%s" % (dn, ("; similar external names: " + "; ".join("`%s`" % en for en, _ in like)) if like else ""))
+    say("")
+
+
+def run_certificate(c):
+    a = c.a
+    servers = c.fetch("/manage/v2/servers?format=json", "servers-list.json", keep=False)
+    items = []
+    for k, v in walk(servers or {}):
+        if k == "list-item":
+            items.extend(v if isinstance(v, list) else [v])
+    say("## App servers with client certificate authentication")
+    say("")
+    chosen = []
+    for it in items:
+        if not isinstance(it, dict) or "nameref" not in it:
+            continue
+        nm, grp = it["nameref"], it.get("groupnameref", "Default")
+        if (a.appserver and nm != a.appserver) or (a.group and grp != a.group):
+            continue
+        sp = c.fetch("/manage/v2/servers/%s/properties?group-id=%s&format=json" % (q(nm), q(grp)), "", keep=False)
+        if not sp:
+            continue
+        if not a.appserver and str(first(sp, "authentication")) != "certificate":
+            continue
+        c.save("server-%s-%s.json" % (grp, slug(nm)), sp)
+        chosen.append((nm, grp, sp))
+    if a.appserver and not chosen:
+        sys.exit("ERROR: app server '%s' not found%s. Servers on this cluster: %s\nRun with --help for all options." % (
+            a.appserver, " in group '%s'" % a.group if a.group else "", ", ".join(sorted({str(i.get('nameref')) for i in items if isinstance(i, dict)}))))
+    if not chosen:
+        say("No app server with authentication `certificate` was found.")
+        say("")
+        missing("App servers using certificate authentication", "none has authentication `certificate`", "pass --appserver <name> to check one anyway")
+    probe_host = a.probe_host or a.host
+    for nm, grp, sp in chosen:
+        port = first(sp, "port")
+        say("### `%s` (group `%s`, port %s)" % (nm, grp, port))
+        say("")
+        policy, minimum = tls_policy(sp, c.major)
+        used = [str(x) for x in find_all(sp, "external-security")]
+        verification = str(first(sp, "ssl-client-issuer-authority-verification")).lower() == "true"
+        require = str(first(sp, "ssl-require-client-certificate")).lower() == "true"
+        say_table([("authentication", str(first(sp, "authentication"))), ("internal-security", str(first(sp, "internal-security"))),
+                   ("external-security", ", ".join(used) or "none"), ("ssl-certificate-template", str(first(sp, "ssl-certificate-template") or "none")),
+                   ("ssl-require-client-certificate", str(first(sp, "ssl-require-client-certificate"))),
+                   ("ssl-client-issuer-authority-verification", str(first(sp, "ssl-client-issuer-authority-verification"))),
+                   ("TLS protocols", policy)])
+        if str(first(sp, "authentication")) != "certificate":
+            check("WARN", "%s: authentication is certificate" % nm, "authentication is `%s`: this app server does not map client certificates to users" % first(sp, "authentication"))
+        if str(first(sp, "internal-security")).lower() == "false":
+            check("WARN", "%s: internal-security" % nm, "false: certificate authentication maps the subject DN to a user of the Security database; the working configurations tested have internal security on")
+        if not used:
+            check("FAIL", "%s: an external security profile is set" % nm,
+                  "none: the ErrorLog says `externalAuthenticate failed because no external security is configured`. Create an external security profile with authentication `certificate` (authorization `internal`) and select it on the app server")
+        for pn in used:
+            pp = c.fetch("/manage/v2/external-security/%s/properties?format=json" % q(pn), "external-security-%s.json" % slug(pn))
+            if pp:
+                pa, pz = str(first(pp, "authentication")), str(first(pp, "authorization"))
+                if pa != "certificate":
+                    check("WARN", "%s: profile %s is a certificate profile" % (nm, pn), "its authentication is `%s`" % pa)
+                if pz not in ("internal", "None"):
+                    check("INFO", "%s: profile %s authorization" % (nm, pn), "`%s`; the certificate labs tested use `internal` (the DN is matched to a user's external name)" % pz)
+        pems = [p for p in find_all(sp, "ssl-client-certificate-pem") if isinstance(p, str)]
+        sel = [cert_info(d) for p in pems for d in split_certs(p)]
+        say("Client certificate authorities selected for this app server (`ssl-client-certificate-authority`): %d" % len(sel))
+        say("")
+        if sel:
+            say("| Subject | Issuer | Valid until |")
+            say("|---|---|---|")
+            for s in sel:
+                say("| `%s` | `%s` | %s |" % (s.get("subject"), s.get("issuer"), cert_expiry_text(s["not_after"].strftime("%Y-%m-%dT%H:%M:%SZ")) if s.get("not_after") else "?"))
+                if s.get("not_after") and s["not_after"] < NOW:
+                    check("FAIL", "%s: selected client CA `%s` is valid" % (nm, s.get("subject")), "expired %s: client certificates it issued are rejected (TLS alert 45)" % fmt_dt(s["not_after"]))
+            say("")
+        else:
+            check("FAIL", "%s: a client certificate authority is selected" % nm,
+                  "none selected: the server never asks for a client certificate, so certificate authentication cannot work. Select the CA(s) in the app server's client certificate authorities")
+        if sel and not verification:
+            say("Issuer verification is false: the CA that signed the client certificate AND every CA above it up to the root must be selected. With true the issuing CA alone is enough.")
+            say("")
+        if not require:
+            say("- A client certificate is not required (`ssl-require-client-certificate` false).")
+            say("")
+        tmpl = first(sp, "ssl-certificate-template")
+        if tmpl:
+            td = c.fetch("/manage/v2/certificate-templates/%s?format=json" % q(tmpl), "certificate-template-%s.json" % slug(tmpl))
+            tid = first(td or {}, "id")
+            if tid:
+                template_report(c, tid, tmpl)
+        else:
+            check("FAIL", "%s: HTTPS enabled" % nm, "no ssl-certificate-template: client certificates need TLS")
+        if getattr(a, "no_probe", False) or not tmpl:
+            continue
+        say("#### What the port serves and asks for (checked from this machine, no client certificate presented)")
+        say("")
+        tls_lines_note()
+        pr = tls_probe(probe_host, port, cafile=a.server_ca)
+        analyse_tls_chain(c, "app server %s (%s:%s)" % (nm, probe_host, port), pr, probe_host, check_ml_trust=False)
+        if pr.get("error"):
+            continue
+        adv = pr.get("ca_names") or []
+        if sel and not pr.get("client_cert_requested"):
+            check("FAIL", "%s: the server asks for a client certificate" % nm,
+                  "client CAs are selected but the handshake carried no `Acceptable client certificate CA names`: the server does not request a certificate (check the app server, a proxy or a load balancer in front of it)")
+        elif pr.get("client_cert_requested"):
+            say("- The server asks for a client certificate and advertises %d CA name(s): %s" % (len(adv), "; ".join("`%s`" % x for x in adv) or "none listed"))
+            say("")
+            if sel and adv:
+                want, got = {dn_key(s["subject"]) for s in sel}, {dn_key(x) for x in adv}
+                if want == got:
+                    check("PASS", "%s: the CA names the server advertises are the selected ones" % nm, "%d CA name(s)" % len(got))
+                else:
+                    check("WARN", "%s: the CA names the server advertises differ from the selected CAs" % nm,
+                          "advertised but not selected: %s; selected but not advertised: %s (a proxy or load balancer in front of the port can change this)" % (
+                              "; ".join(sorted(x for x in adv if dn_key(x) not in want)) or "none", "; ".join(sorted(s["subject"] for s in sel if dn_key(s["subject"]) not in got)) or "none"))
+        elif not sel:
+            say("- The server does not ask for a client certificate (no client CA is selected).")
+            say("")
+    if a.client_cert:
+        check_client_cert(c, a, chosen)
+    else:
+        missing("Client certificate checks (validity, usage, issuer selection, user mapping)", "no --client-cert given",
+                "add --client-cert <public certificate PEM of the client> (never a private key); --client-chain adds its intermediate and root")
+    if chosen:
+        duplicates_report(c)
+    say("### TLS alerts of a rejected client certificate (nothing is written to the ErrorLog or AccessLog)")
+    say("")
+    say("A certificate that fails in the TLS handshake leaves no trace on the server. Run on the client, for example `openssl s_client -connect <host>:<port> -cert client.pem -key client.key` or `curl -v --cert client.pem --key client.key https://<host>:<port>/`, and read the alert:")
+    say("")
+    say("| Alert | Usual cause |")
+    say("|---|---|")
+    for alert, why in CERT_ALERTS:
+        say("| %s | %s |" % (alert, why))
+    say("")
+    say("Only a certificate that passes TLS but maps to no MarkLogic user (`certificateAuthenticate() fail because no user`) and a successful login (`certificateAuthenticate() pass`) appear in the ErrorLog, with the trace event External Authenticate on.")
+    say("")
+    if a.logs:
+        analyse_logs_generic(c, "certificate", [{"name": nm, "group": grp, "port": first(sp, "port")} for nm, grp, sp in chosen])
+    else:
+        missing("ErrorLog lines (no user / pass)", "--logs not given",
+                "add --logs --start <UTC time shortly before the test> (switch the trace event on first: ml-trace-events.py enable --preset certificate)")
+
+
 # ---------------------------------------------------------------- SAML
 def run_saml(c):
     a, api, out, fetch, save, errors = c.a, c.api, c.out, c.fetch, c.save, c.errors
@@ -2397,6 +2737,24 @@ Private CA (check the served chain against it):
     s.add_argument("--group", help="group of the app server (default: any)")
     s.add_argument("--server-ca", metavar="CA.PEM", help="CA bundle for verifying the certificate the app server presents")
     s.add_argument("--probe-host", metavar="HOST", help="host name to connect to for the live TLS check (default: --host)")
+
+    s = add("certificate", "client certificate authentication of an app server (selected CAs, issuer, DN to user mapping)", """CERTIFICATE: read the settings of the app servers that use
+authentication `certificate` (selected client CAs, issuer verification, external security profile), what the port really asks for, and, with --client-cert
+(a PUBLIC certificate: never a key), whether that client certificate would be accepted (validity, key usage, issuer selected) and which MarkLogic user its
+subject DN maps to. A client certificate that fails in the TLS handshake leaves nothing in the logs: the report explains the TLS alerts. Only --host and --user
+are required.
+
+Smallest useful run:
+  ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <app server name>
+Fuller run (a certificate is refused):
+  ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <name> --client-cert client.pem \\
+      --client-chain ca-chain.pem --logs --start 2026-01-15T09:00:00Z""", [base, logs, probe])
+    s.add_argument("--appserver", metavar="NAME", help="check this app server (default: every app server with authentication certificate)")
+    s.add_argument("--group", help="group of the app server (default: any)")
+    s.add_argument("--server-ca", metavar="CA.PEM", help="CA bundle for verifying the certificate the app server presents")
+    s.add_argument("--probe-host", metavar="HOST", help="host name to connect to for the live TLS check (default: --host)")
+    s.add_argument("--client-cert", metavar="CERT.PEM", help="public certificate of the client (PEM). A file with a private key is refused")
+    s.add_argument("--client-chain", metavar="CHAIN.PEM", help="intermediate and root certificates of the client certificate (PEM, public)")
     return top, subs
 
 
@@ -2407,7 +2765,7 @@ def main():
         # argparse would report this from the top-level parser; show the help of the area instead
         subs[a.area].error("unrecognized arguments: %s" % " ".join(extra))
     c = setup(a, subs[a.area], a.area)
-    {"saml": run_saml, "oauth": run_oauth, "ldap": run_ldap, "https": run_https}[a.area](c)
+    {"saml": run_saml, "oauth": run_oauth, "ldap": run_ldap, "https": run_https, "certificate": run_certificate}[a.area](c)
     finish(c)
 
 
