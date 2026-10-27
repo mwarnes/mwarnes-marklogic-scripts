@@ -56,8 +56,8 @@ class Handler(BaseHTTPRequestHandler):
                 "oauth-jwks-uri": "http://127.0.0.1:%d/jwks" % PORT, "oauth-jwt-alg": "RS256",
                 "oauth-username-attribute": "preferred_username", "oauth-role-attribute": "groups", "oauth-client-secret": "SECRETVALUE"}})
         if p == "/manage/v2/external-security/ld/properties":
-            return self.reply({"external-security-name": "ld", "authentication": "ldap", "authorization": "internal", "ldap-server": {
-                "ldap-server-uri": "ldap://127.0.0.1:9", "ldap-base": "dc=x", "ldap-attribute": "uid", "ldap-password": "SECRETVALUE"}})
+            return self.reply({"external-security-name": "ld", "authentication": "ldap", "authorization": STATE.get("ldap_authz", "internal"), "ldap-server": {
+                "ldap-server-uri": "ldap://127.0.0.1:9", "ldap-base": "dc=x,dc=com", "ldap-attribute": "uid", "ldap-password": "SECRETVALUE"}})
         if p == "/manage/v2/servers":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "api", "groupnameref": "Default"}]}}})
         if p == "/manage/v2/servers/api/properties":
@@ -65,11 +65,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/manage/v2/roles":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "reader"}]}}})
         if p == "/manage/v2/roles/reader/properties":
-            return self.reply({"role-name": "reader", "external-name": ["ml-readers"]})
+            return self.reply({"role-name": "reader", "external-name": ["ml-readers"] + STATE.get("role_dns", [])})
         if p == "/manage/v2/groups/Default/properties":
             return self.reply({"group-name": "Default", "events-activated": True, "event": ["OAuth", "External Authenticate"]})
         if p == "/manage/v2/logs":
-            return self.reply((ERRLOG + STATE.get("errlog_extra", "")) if "ErrorLog" in self.path else ACCESS, text=True)
+            return self.reply((ERRLOG + STATE.get("errlog_extra", "")) if "ErrorLog" in self.path else ACCESS + STATE.get("access_extra", ""), text=True)
         if p == "/iss/.well-known/openid-configuration":
             return self.reply({"issuer": ISS, "jwks_uri": "http://127.0.0.1:%d/jwks" % PORT})
         if p == "/jwks":
@@ -225,6 +225,52 @@ class GatherTests(unittest.TestCase):
             STATE.pop("extra_oauth", None)
         rows = [l for l in s.splitlines() if l.startswith("| **")]
         self.assertEqual(len(rows), len(set(rows)))
+
+    def ldap_groups_summary(self, role_dns, *extra):
+        STATE.update(ldap_authz="ldap", role_dns=role_dns)
+        try:
+            r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", *extra)
+        finally:
+            for k in ("ldap_authz", "role_dns", "errlog_extra", "access_extra"):
+                STATE.pop(k, None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return s
+
+    def test_group_dn_outside_ldap_base_is_warned_about(self):
+        s = self.ldap_groups_summary(["cn=lab-users,dc=x,dc=org"])
+        self.assertRegex(s, r"\*\*WARN\*\* \| ld: no role external name is a group DN under ldap-base `dc=x,dc=com`")
+        self.assertIn("cn=lab-users,dc=x,dc=org", s)
+        self.assertNotIn("no memberOf/member lookup attribute", s)
+
+    def test_group_dn_under_ldap_base_passes_whatever_the_case_and_spacing(self):
+        s = self.ldap_groups_summary(["CN=lab-users, DC=X, dc=com"])
+        self.assertRegex(s, r"\*\*PASS\*\* \| ld: a role external name is a group DN under ldap-base")
+        self.assertNotIn("no role external name is a group DN", s)
+
+    def test_a_near_miss_suffix_is_warned_about_even_when_another_role_matches(self):
+        s = self.ldap_groups_summary(["cn=ok,dc=x,dc=com", "cn=typo,dc=x,dc=org"])
+        self.assertRegex(s, r"\*\*WARN\*\* \| ld: a role external name is a group DN that looks like ldap-base")
+        self.assertIn("cn=typo,dc=x,dc=org", s)
+
+    def test_a_dn_of_another_directory_is_only_information(self):
+        s = self.ldap_groups_summary(["cn=ok,dc=x,dc=com", "cn=other,o=elsewhere"])
+        self.assertRegex(s, r"\*\*INFO\*\* \| ld: other role external names are DNs outside ldap-base")
+        self.assertNotIn("looks like ldap-base", s)
+
+    def test_no_dn_shaped_external_name_is_warned_about(self):
+        s = self.ldap_groups_summary([])
+        self.assertIn("No role external name looks like a DN at all", s)
+
+    def test_authorization_internal_does_not_get_the_group_dn_check(self):
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe")
+        self.assertNotIn("group DN under ldap-base", s)
+
+    def test_a_login_that_passed_and_then_got_403_is_explained(self):
+        STATE["errlog_extra"] = "2026-10-25 10:00:08.000 Info: [Event:id=External Authenticate] ExternalSecurity[ld] ldapAuthenticate() pass bob\n"
+        STATE["access_extra"] = '203.0.113.9 - bob [25/Oct/2026:10:00:09 +0000] "GET /qconsole/ HTTP/1.1" 403 0 - "curl"\n'
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
+        s = self.ldap_groups_summary(["cn=lab-users,dc=x,dc=org"], *win)
+        self.assertIn("LDAP login passed, then the request was refused (403)", s)
 
     def test_minimal_run_lists_what_was_not_collected(self):
         r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
