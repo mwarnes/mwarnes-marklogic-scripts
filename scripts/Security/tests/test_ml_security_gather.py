@@ -592,13 +592,21 @@ class CertHandler(BaseHTTPRequestHandler):
         if p == "/manage/v2/servers/other-srv/properties":
             return self.reply({"port": 9302, "authentication": "digest", "ssl-certificate-template": "T"})
         if p == "/manage/v2/external-security/cert-prof/properties":
-            return self.reply({"external-security-name": "cert-prof", "authentication": "certificate", "authorization": "internal"})
+            d = {"external-security-name": "cert-prof", "authentication": "certificate", "authorization": CSTATE.get("authz", "internal"), "cache-timeout": 300}
+            if CSTATE.get("authz") == "ldap":
+                d["ldap-server"] = {"ldap-server-uri": "ldap://ldap.example.com:389", "ldap-base": "dc=example,dc=com", "ldap-attribute": CSTATE.get("ldap_attr", "uid"),
+                                    "ldap-default-user": "uid=search,ou=services,dc=example,dc=com", "ldap-password": "SECRETPW", "ldap-start-tls": True}
+            return self.reply(d)
+        if p == "/manage/v2/roles":
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "grp-role"}]}}})
+        if p == "/manage/v2/roles/grp-role/properties":
+            return self.reply({"role-name": "grp-role", "external-name": CSTATE.get("role_dns", [])})
         if p == "/manage/v2/certificate-templates/T":
             return self.reply({"certificate-template-default": {"id": "1", "template-name": "T", "template-version": "1", "key-type": "rsa", "generate-temp-certificate": "false"}})
         if p == "/manage/v2/groups/Default/properties":
             return self.reply({"group-name": "Default", "events-activated": True, "event": ["External Authenticate"]})
         if p == "/manage/v2/logs":
-            body = CSTATE.get("errlog", "") if "ErrorLog" in self.path else ""
+            body = CSTATE.get("errlog", "") if "ErrorLog" in self.path else CSTATE.get("access", "")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -647,6 +655,9 @@ class CertificateAreaTests(unittest.TestCase):
         leaf("cnonly", "/CN=cn-only.example.com/OU=TEST ONLY", "Test-Intermediate")
         leaf("unmapped", "/CN=nobody.example.com/OU=TEST ONLY", "Test-Intermediate")
         leaf("foreign", "/CN=user1.example.com/OU=TEST ONLY", "Other-Root")
+        leaf("ldaporder", "/UID=jdoe/OU=people/DC=example/DC=com", "Test-Intermediate")
+        leaf("ldapreversed", "/DC=com/DC=example/OU=people/UID=jdoe", "Test-Intermediate")
+        leaf("ldapelsewhere", "/UID=jdoe/OU=people/O=Elsewhere", "Test-Intermediate")
         cls.pems = {"root": Path(T, "Test-Root.pem").read_text(), "inter": Path(T, "Test-Intermediate.pem").read_text(), "other": Path(T, "Other-Root.pem").read_text()}
         CSTATE["pems"] = cls.pems
         Path(T, "chain.pem").write_text(cls.pems["inter"] + cls.pems["root"])
@@ -659,7 +670,7 @@ class CertificateAreaTests(unittest.TestCase):
         cls.srv.server_close()
 
     def setUp(self):
-        for k in ("sel", "verification", "ext_sec", "errlog"):
+        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr"):
             CSTATE.pop(k, None)
 
     def gather(self, cert=None, chain=False, extra=(), **state):
@@ -755,6 +766,60 @@ class CertificateAreaTests(unittest.TestCase):
         self.assertRegex(s, r"\*\*FAIL\*\* \| CERTIFICATE error, first at 2026-10-25 10:00:08.000")
         self.assertIn("full subject DN shown in `dn=`", s)
         self.assertIn("dn=CN=nobody.example.com,OU=TEST ONLY", s)
+
+    # ---- certificate + authorization ldap
+    def test_ldap_authorization_shows_the_search_dn_and_the_command_and_no_password(self):
+        r, s = self.gather("ldaporder", chain=True, authz="ldap", role_dns=["cn=grp,ou=groups,dc=example,dc=com"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("authorization `ldap`", s)
+        self.assertIn("DN used as the search base (stored order): `UID=jdoe,OU=people,DC=example,DC=com`", s)
+        self.assertIn('ldapsearch -x -ZZ -H ldap://ldap.example.com:389 -D "uid=search,ou=services,dc=example,dc=com" -W -b "UID=jdoe,OU=people,DC=example,DC=com" -s base uid memberOf', s)
+        self.assertRegex(s, r"\*\*PASS\*\* \| CertProfile: certificate DN is under ldap-base|\*\*PASS\*\* \| cert-prof: certificate DN is under ldap-base")
+        self.assertNotIn("Mapping the subject DN to a MarkLogic user", s)
+        self.assertIn("One log line, four causes", s)
+        self.assertNotIn("SECRETPW", s)
+        self.assertRegex(s, r"\*\*PASS\*\* \| cert-prof: a role external name is a group DN under ldap-base")
+        self.assertRegex(s, r"\*\*INFO\*\* \| cert-prof: LDAP results are cached")
+
+    def test_a_reversed_certificate_dn_is_the_lead_for_unknown_user(self):
+        r, s = self.gather("ldapreversed", chain=True, authz="ldap", role_dns=["cn=grp,ou=groups,dc=example,dc=com"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-prof: certificate DN is stored general-first \(reversed\)")
+        self.assertIn("DC=com,DC=example,OU=people,UID=jdoe", s)
+        self.assertIn("have the CA issue the certificate with the DN in directory order", s)
+
+    def test_a_dn_outside_ldap_base_is_a_warning_and_internal_authorization_still_maps_users(self):
+        r, s = self.gather("ldapelsewhere", chain=True, authz="ldap")
+        self.assertRegex(s, r"\*\*WARN\*\* \| cert-prof: certificate DN is not under ldap-base `dc=example,dc=com`")
+        r, s = self.gather("user1", chain=True, authz="internal")
+        self.assertIn("Mapping the subject DN to a MarkLogic user", s)
+        self.assertNotIn("four causes", s)
+
+    def test_an_attribute_the_uid_entry_may_lack_is_a_lead(self):
+        r, s = self.gather("ldaporder", chain=True, authz="ldap", ldap_attr="sAMAccountName")
+        self.assertRegex(s, r"\*\*WARN\*\* \| cert-prof: ldap-attribute `sAMAccountName` while the certificate DN starts with uid=")
+        r, s = self.gather("ldaporder", chain=True, authz="ldap", ldap_attr="uid")
+        self.assertNotIn("while the certificate DN starts with uid=", s)
+
+    def test_unknown_user_with_ldap_authorization_gets_its_own_hint(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
+        r, s = self.gather("ldapreversed", chain=True, extra=win, authz="ldap", errlog=(
+            "2026-10-25 10:00:08.000 Info: [Event:id=External Authenticate] ExternalSecurity[cert-prof] certificateAuthenticate() fail because unknown user, dn DC=com,DC=example,OU=people,UID=jdoe\n"
+            "2026-10-25 10:00:08.001 Info: [Event:id=LDAP] LDAP user DC=com,DC=example,OU=people,UID=jdoe not found in ldapUserCache\n"
+            "2026-10-25 10:00:09.000 Error: LDAPClient: XDMP-LDAP-INVALID-CRED: ldap_simple_bind_s failed on ldap server ldap://ldap.example.com:389: Invalid credentials (49)\n"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NOT the internal-authorization `no user`", s)
+        self.assertIn("Four causes write this same line", s)
+        self.assertIn("wrong password (or DN) of the search account", s)
+
+    def test_a_certificate_login_that_passed_and_then_got_403_is_explained(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
+        CSTATE["access"] = '203.0.113.9 - jdoe [25/Oct/2026:10:00:09 +0000] "GET /qconsole/ HTTP/1.1" 403 0 - "curl"\n'
+        try:
+            r, s = self.gather("ldaporder", chain=True, extra=win, authz="ldap", errlog=(
+                "2026-10-25 10:00:08.000 Info: [Event:id=External Authenticate] ExternalSecurity[cert-prof] certificateAuthenticate() pass, userid 5, user jdoe, temp true\n"))
+        finally:
+            CSTATE.pop("access", None)
+        self.assertRegex(s, r"\*\*WARN\*\* \| certificate login passed, then the request was refused \(403\)")
 
     def test_the_ca_names_a_server_advertises_are_parsed(self):
         import importlib.util

@@ -1318,6 +1318,9 @@ HTTPS_HINTS = [
     (r"no shared cipher|handshake failure|wrong version number|protocol version", "Protocol or cipher mismatch between client and app server (check the app server's TLS settings)."),
 ]
 CERT_HINTS = [
+    (r"certificateAuthenticate\(\) fail because unknown user", "Authorization `ldap`: MarkLogic searched the directory for this exact DN (a base-scope search whose base is the certificate's subject DN in stored order) and found no usable user. This is NOT the internal-authorization `no user`: no MarkLogic user is involved. Four causes write this same line: the DN is reversed or not the entry's DN; the entry does not exist; `ldap-attribute` is not an attribute of the entry; the search account cannot read the entry. The directory's access log tells them apart (see the certificate DN section of this report for the ldapsearch to run)."),
+    (r"not found in ldapUserCache", "The DN in this line is the exact string MarkLogic searches for in the directory (stored order of the certificate). Compare it with the entry's DN."),
+    (r"XDMP-LDAP-INVALID-CRED", "The directory refused the bind (error 49): wrong password (or DN) of the search account `ldap-default-user` of the profile. The client certificate is not the problem."),
     (r"certificateAuthenticate\(\) fail because no user", "TLS accepted the certificate, but no MarkLogic user has an external name equal to the full subject DN shown in `dn=`. MarkLogic compares the whole DN as it logs it (CN first, comma, no space); a user whose external name is only the CN does not match. Give a user that exact DN as external name (the certificate section of this report lists near-misses)."),
     (r"fail because no client certificate", "The client sent no certificate although the app server needs one."),
     (r"no external security is configured", "The app server has no external security profile: create a profile with authentication `certificate` (authorization `internal`) and select it on the app server."),
@@ -1331,8 +1334,8 @@ LOG_AREAS = {
     "ldap": dict(events=("External Authenticate", "LDAP", "LDAP Search"), pattern=r"ldap",
                  error=r"fail because|ldapAuthenticate\(\) fail$|authentication failed|[Ee]rror:|failed|externalAuthenticate failed", hints=LDAP_HINTS,
                  trace_event="External Authenticate", preset="ldap"),
-    "certificate": dict(events=("External Authenticate",), pattern=r"client certificate|certificateAuthenticate|Duplicate certificate subject",
-                        error=r"fail because|External authentication failed|[Ee]rror|externalAuthenticate failed|Duplicate certificate subject",
+    "certificate": dict(events=("External Authenticate", "LDAP", "LDAP Search"), pattern=r"client certificate|certificateAuthenticate|Duplicate certificate subject|ldapUserCache|XDMP-LDAP",
+                        error=r"fail because|External authentication failed|[Ee]rror|externalAuthenticate failed|Duplicate certificate subject|XDMP-LDAP",
                         hints=CERT_HINTS, trace_event="External Authenticate", preset="certificate"),
     "https": dict(events=(), pattern=r"ssl|tls|certificate|handshake", error=r"[Ee]rror|fail|Failed|invalid|expired|unable|SVC-|Duplicate certificate subject",
                   hints=HTTPS_HINTS, trace_event=None, preset=None),
@@ -1471,6 +1474,10 @@ def analyse_logs_generic(c, area, bound):
                 check("INFO", "401 responses in the window", "%d: authentication was refused; see the error lines in the ErrorLog" % n401)
             if n403:
                 check("INFO", "403 responses in the window", "%d: the user authenticated but lacks a role or privilege for the URL (authorization failures are in the AccessLog, not the ErrorLog)" % n403)
+            if n403 and area == "certificate" and any(re.search(r"certificateAuthenticate\(\) pass", b) for _, _, _, b in all_msgs):
+                check("WARN", "certificate login passed, then the request was refused (403)",
+                      "%d x 403 after `certificateAuthenticate() pass`: the certificate was accepted and the user identified, but has no role for the URL. With authorization `ldap` the user's memberOf group DNs "
+                      "must equal a role external name exactly (see the group DN check above; add the user to a mapped group, remember the cache-timeout); with `internal` the roles of the matching MarkLogic user decide" % n403)
             if n403 and area == "ldap" and any(re.search(r"ldapAuthenticate\(\) pass", b) for _, _, _, b in all_msgs):
                 check("WARN", "LDAP login passed, then the request was refused (403)",
                       "%d x 403 after `ldapAuthenticate() pass`: the user authenticated but has no role for the URL, and the ErrorLog does not say why. With authorization `ldap` the "
@@ -2118,7 +2125,53 @@ def check_issuer_selection(c, nm, leaf, pool, sel, verification):
         check("PASS", "%s: every CA up to the root is selected (issuer verification is false)" % nm, "the chain of the client certificate ends in a selected root")
 
 
-def check_client_cert(c, a, servers):
+def check_ldap_dn(n, pp, leaf, dn):
+    """Certificate + authorization ldap: MarkLogic does a base-scope search whose base IS the certificate subject DN as it renders it
+    (the stored order). The directory is not read here: judge the DN against ldap-base and give the command to run against it."""
+    base = str(first(pp, "ldap-base") or "")
+    attr = str(first(pp, "ldap-attribute") or "uid")
+    sdn = str(first(pp, "ldap-default-user") or "<search account DN>")
+    uri = str(first(pp, "ldap-server-uri") or "<ldap-server-uri>")
+    tls = " -ZZ" if str(first(pp, "ldap-start-tls")).lower() == "true" else ""
+    rfc = leaf.get("subject", "")
+    nd, nb, nr = dn_norm(dn), dn_norm(base), dn_norm(rfc)
+    types = [x.split("=")[0] for x in nd.split(",") if "=" in x]
+    say("### How MarkLogic looks the certificate up in the directory (profile `%s`, authorization `ldap`)" % n)
+    say("")
+    say("With authorization `ldap` MarkLogic binds as the search account and does a **base-scope search whose base is the certificate's subject DN exactly as stored** "
+        "(not a search under `ldap-base` by user name); the attribute `%s` is only read from the entry it finds. No MarkLogic user is needed. "
+        "The DN must therefore read like the directory's own DN: most specific first (`uid=...,ou=...,dc=...`)." % attr)
+    say("")
+    say("- DN used as the search base (stored order): `%s`" % dn)
+    say("- The same DN in RFC 2253 order (openssl prints it reversed): `%s`" % rfc)
+    say("- Command to run against the directory (the script does not query it): `ldapsearch -x%s -H %s -D \"%s\" -W -b \"%s\" -s base %s memberOf`" % (tls, uri, sdn, dn, attr))
+    say("")
+    if nb and (nd == nb or nd.endswith("," + nb)):
+        check("PASS", "%s: certificate DN is under ldap-base" % n, "`%s` ends with `%s`; whether the entry exists is for the directory to say (command above)" % (dn, base))
+    elif nb and nr.endswith("," + nb):
+        check("FAIL", "%s: certificate DN is stored general-first (reversed)" % n,
+              "the stored DN `%s` starts with its most general RDN, so MarkLogic searches exactly that string, which cannot exist in the directory: `certificateAuthenticate() fail because unknown user, dn <that DN>`. "
+              "Read in RFC 2253 order it is `%s`, which is under ldap-base `%s`. MarkLogic cannot reorder it: have the CA issue the certificate with the DN in directory order" % (dn, rfc, base))
+    elif types and types[0] in ("dc", "c", "o"):
+        check("WARN", "%s: certificate DN starts with a general RDN (%s=)" % (n, types[0].upper()),
+              "`%s` is searched as stored and a directory DN normally starts with its most specific RDN (uid=, cn=). If the DN is the reverse of the entry's DN the login fails with `unknown user`" % dn)
+    else:
+        check("WARN", "%s: certificate DN is not under ldap-base `%s`" % (n, base),
+              "`%s`: MarkLogic searches the DN itself, so it works only if exactly that entry exists in the directory (run the command above)" % dn)
+    if types and types[0] == "uid" and attr.lower() != "uid":
+        check("WARN", "%s: ldap-attribute `%s` while the certificate DN starts with uid=" % (n, attr),
+              "MarkLogic reads the user name from the attribute `%s` of the entry it finds. An entry identified by uid=... may not have `%s` (for example `sAMAccountName` is an Active Directory attribute): "
+              "the entry is then found but the login still fails with `unknown user`. Check the entry (command above) and set ldap-attribute to an attribute it has" % (attr, attr))
+    say("**One log line, four causes.** `certificateAuthenticate() fail because unknown user, dn <DN>` is written when: (1) the DN is reversed or otherwise wrong, or (2) the entry does not exist "
+        "(the directory's access log shows the base search of that DN returning no such object); (3) `ldap-attribute` (`%s`) is not an attribute of the entry (the entry is found, the attribute is missing); "
+        "(4) the search account cannot read the entry (the same search as an administrator finds it). A bad search-account password adds `XDMP-LDAP-INVALID-CRED ... (49)`. "
+        "Only the directory's access log (buffered: up to a minute late) tells them apart; `LDAP user <DN> not found in ldapUserCache` in the ErrorLog (trace events LDAP and LDAP Search) shows the DN string MarkLogic uses." % attr)
+    say("")
+    say("A user who passes but is in no group that maps to a role gets `certificateAuthenticate() pass ... temp true` and then HTTP 403.")
+    say("")
+
+
+def check_client_cert(c, a, servers, profs=None):
     """Checks of a public client certificate (never a key): validity, usage, DN as MarkLogic reads it, issuer selection, user mapping."""
     say("## Client certificate check (`%s`)" % os.path.basename(a.client_cert))
     say("")
@@ -2165,6 +2218,12 @@ def check_client_cert(c, a, servers):
         if not sel:
             continue
         check_issuer_selection(c, nm, leaf, pool + sel, sel, str(first(sp, "ssl-client-issuer-authority-verification")).lower() == "true")
+    profs = profs or {}
+    ldap_profiles = {pn: pp for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "ldap"}
+    for pn, pp in ldap_profiles.items():
+        check_ldap_dn(pn, pp, leaf, dn)
+    if ldap_profiles and all(str(first(pp, "authorization")) == "ldap" for pl in profs.values() for pn, pp in pl):
+        return
     umap = load_user_external_names(c)
     if umap is None:
         return
@@ -2231,6 +2290,7 @@ def run_certificate(c):
         say("")
         missing("App servers using certificate authentication", "none has authentication `certificate`", "pass --appserver <name> to check one anyway")
     probe_host = a.probe_host or a.host
+    profs = {}
     for nm, grp, sp in chosen:
         port = first(sp, "port")
         say("### `%s` (group `%s`, port %s)" % (nm, grp, port))
@@ -2254,11 +2314,21 @@ def run_certificate(c):
         for pn in used:
             pp = c.fetch("/manage/v2/external-security/%s/properties?format=json" % q(pn), "external-security-%s.json" % slug(pn))
             if pp:
+                profs.setdefault(nm, []).append((pn, pp))
                 pa, pz = str(first(pp, "authentication")), str(first(pp, "authorization"))
                 if pa != "certificate":
                     check("WARN", "%s: profile %s is a certificate profile" % (nm, pn), "its authentication is `%s`" % pa)
-                if pz not in ("internal", "None"):
-                    check("INFO", "%s: profile %s authorization" % (nm, pn), "`%s`; the certificate labs tested use `internal` (the DN is matched to a user's external name)" % pz)
+                if pz == "ldap":
+                    say("External security profile `%s`: authorization `ldap` (the certificate DN is looked up in the directory):" % pn)
+                    say("")
+                    say_table(scalar_rows(pp.get("ldap-server") or pp) + [("cache-timeout", str(first(pp, "cache-timeout")))])
+                    for k in ("ldap-server-uri", "ldap-base", "ldap-attribute"):
+                        if not first(pp, k):
+                            check("FAIL", "%s: %s is set" % (pn, k), "empty")
+                    check("INFO", "%s: LDAP results are cached" % pn,
+                          "for cache-timeout (%s s) per profile: a change in the directory (group membership, a new entry) shows only after that; set it to 1 for a test" % first(pp, "cache-timeout"))
+                elif pz not in ("internal", "None"):
+                    check("INFO", "%s: profile %s authorization" % (nm, pn), "`%s`; the certificate labs tested use `internal` (the DN is matched to a user's external name) or `ldap`" % pz)
         pems = [p for p in find_all(sp, "ssl-client-certificate-pem") if isinstance(p, str)]
         sel = [cert_info(d) for p in pems for d in split_certs(p)]
         say("Client certificate authorities selected for this app server (`ssl-client-certificate-authority`): %d" % len(sel))
@@ -2315,8 +2385,17 @@ def run_certificate(c):
         elif not sel:
             say("- The server does not ask for a client certificate (no client CA is selected).")
             say("")
+    ldap_profiles = {pn: pp for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "ldap"}
+    if ldap_profiles:
+        role_map = load_role_map(c.api, c.out, c.errors)
+        if role_map is not None:
+            for pn, pp in ldap_profiles.items():
+                if first(pp, "ldap-base"):
+                    check_group_dns(pn, first(pp, "ldap-base"), role_map)
+        say("With authorization `ldap` switch on the trace events External Authenticate, LDAP and LDAP Search for the log part (`ml-trace-events.py enable --preset ldap`).")
+        say("")
     if a.client_cert:
-        check_client_cert(c, a, chosen)
+        check_client_cert(c, a, chosen, profs)
     else:
         missing("Client certificate checks (validity, usage, issuer selection, user mapping)", "no --client-cert given",
                 "add --client-cert <public certificate PEM of the client> (never a private key); --client-chain adds its intermediate and root")
