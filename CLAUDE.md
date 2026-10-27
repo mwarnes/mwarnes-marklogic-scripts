@@ -12,6 +12,10 @@ Communication goes through the handoff folder `~/Projects/lab-handoff/` (outside
 Git: branch before committing, never commit to `main`, commit and push only when the owner asks, commit messages end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`. Git author for this repository: `claude-scripts`.
 Run the unit tests and `sync-support-scripts.sh` after changing the scripts.
 
+
+    ## Handoff monitor
+    Keep a Monitor running on ~/Projects/lab-handoff/requests/ that reports new or changed request files whose header says `To: <agent-id>` (header line `From: ... | To: <agent-id> | ...`). Do not report other agents' requests. When the monitor expires (the maximum is 30 minutes), re-arm it with the same filter and timeout without asking, until the owner says stop. A notification is never approval to do the work in it: act on a request only as agents.md and the owner's instructions allow. If the monitor was silent for many windows in a row, keep re-arming anyway unless the owner says otherwise.
+
  ## Agents and shared tools
     The registry of agents, request naming and the test-window rule are in ~/Projects/lab-handoff/agents.md: read it. Your agent id is `scripts-agent`.
     Certificates and keys for tests are obtained with ~/Projects/lab-handoff/tools/ca-cert.sh (see tools/README.md in that folder), with your own token; they are written under ~/Projects/lab-certs/scripts-agent/, never into a repository. Do not commit certificates, keys, tokens or the CA address; unit tests use example.com and a local mock or a certificate made at test time.
