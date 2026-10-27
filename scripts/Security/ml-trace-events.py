@@ -38,6 +38,7 @@ PRESETS = {
     "saml": ["SAML", "SAML Response", "External Authenticate"],
     "oauth": ["OAuth", "OAuth Status", "OAuth Communications", "OAuth JSON Processing", "External Authenticate"],
     "ldap": ["External Authenticate", "LDAP", "LDAP Search"],
+    "certificate": ["External Authenticate"],
 }
 STATE_FILE = ".ml-trace-events-state.json"
 

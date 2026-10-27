@@ -558,5 +558,216 @@ class UserOptionTests(unittest.TestCase):
         self.assertIn("any other administrator account", r.stderr)
 
 
+# ---------------------------------------------------------------- certificate area (client certificate authentication)
+CPORT = 18097
+CSTATE = {}
+
+
+class CertHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, obj):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(obj).encode())
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        pems = CSTATE["pems"]
+        if p == "/manage/v2":
+            return self.reply({"local-cluster-default": {"version": "11.3.7", "name": "mock"}})
+        if p == "/manage/v2/hosts":
+            return self.reply({"x": {"status-list-items": {"status-list-item": [{"nameref": "h1"}]}}})
+        if p == "/manage/v2/servers":
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "cert-srv", "groupnameref": "Default"}, {"nameref": "other-srv", "groupnameref": "Default"}]}}})
+        if p == "/manage/v2/servers/cert-srv/properties":
+            d = {"port": 9301, "authentication": "certificate", "internal-security": True, "ssl-certificate-template": "T",
+                 "ssl-require-client-certificate": True, "ssl-client-issuer-authority-verification": CSTATE.get("verification", False),
+                 "ssl-client-certificate-pem": [pems[k] for k in CSTATE.get("sel", ["root", "inter"])]}
+            if CSTATE.get("ext_sec", True):
+                d["external-security"] = ["cert-prof"]
+            return self.reply(d)
+        if p == "/manage/v2/servers/other-srv/properties":
+            return self.reply({"port": 9302, "authentication": "digest", "ssl-certificate-template": "T"})
+        if p == "/manage/v2/external-security/cert-prof/properties":
+            return self.reply({"external-security-name": "cert-prof", "authentication": "certificate", "authorization": "internal"})
+        if p == "/manage/v2/certificate-templates/T":
+            return self.reply({"certificate-template-default": {"id": "1", "template-name": "T", "template-version": "1", "key-type": "rsa", "generate-temp-certificate": "false"}})
+        if p == "/manage/v2/groups/Default/properties":
+            return self.reply({"group-name": "Default", "events-activated": True, "event": ["External Authenticate"]})
+        if p == "/manage/v2/logs":
+            body = CSTATE.get("errlog", "") if "ErrorLog" in self.path else ""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(body.encode())
+            return
+        if p == "/manage/v2/users":
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "u1"}, {"nameref": "u2"}]}}})
+        if p == "/manage/v2/users/u1/properties":
+            return self.reply({"user-name": "u1", "role": ["reader"], "external-name": ["CN=user1.example.com,OU=TEST ONLY"]})
+        if p == "/manage/v2/users/u2/properties":
+            return self.reply({"user-name": "u2", "role": ["reader"], "external-name": ["cn-only.example.com"]})
+        self.send_response(404)
+        self.end_headers()
+
+
+class CertificateAreaTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="cert-test.")
+        T = cls.tmp
+
+        def ossl(*args):
+            subprocess.run(["openssl"] + list(args), capture_output=True, check=True, cwd=T)
+
+        def ca(name, issuer=None):
+            ossl("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", name + ".key", "-out", name + ".csr", "-subj", "/CN=" + name)
+            Path(T, name + ".ext").write_text("basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
+            if issuer:
+                ossl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem", "-CAkey", issuer + ".key", "-CAcreateserial", "-out", name + ".pem", "-days", "30", "-extfile", name + ".ext")
+            else:
+                ossl("x509", "-req", "-in", name + ".csr", "-signkey", name + ".key", "-out", name + ".pem", "-days", "30", "-extfile", name + ".ext")
+
+        def leaf(name, subj, issuer, eku="clientAuth", times=None, days="30"):
+            ossl("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", name + ".key", "-out", name + ".csr", "-subj", subj)
+            Path(T, name + ".ext").write_text("basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=%s\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" % eku)
+            args = ["x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem", "-CAkey", issuer + ".key", "-CAcreateserial", "-out", name + ".pem", "-extfile", name + ".ext"]
+            args += (["-not_before", times[0], "-not_after", times[1]] if times else ["-days", days])
+            ossl(*args)
+
+        ca("Test-Root")
+        ca("Test-Intermediate", "Test-Root")
+        ca("Other-Root")
+        leaf("user1", "/CN=user1.example.com/OU=TEST ONLY", "Test-Intermediate")
+        leaf("serveronly", "/CN=user1.example.com/OU=TEST ONLY", "Test-Intermediate", eku="serverAuth")
+        leaf("expired", "/CN=user1.example.com/OU=TEST ONLY", "Test-Intermediate", times=("20200101000000Z", "20200102000000Z"))
+        leaf("cnonly", "/CN=cn-only.example.com/OU=TEST ONLY", "Test-Intermediate")
+        leaf("unmapped", "/CN=nobody.example.com/OU=TEST ONLY", "Test-Intermediate")
+        leaf("foreign", "/CN=user1.example.com/OU=TEST ONLY", "Other-Root")
+        cls.pems = {"root": Path(T, "Test-Root.pem").read_text(), "inter": Path(T, "Test-Intermediate.pem").read_text(), "other": Path(T, "Other-Root.pem").read_text()}
+        CSTATE["pems"] = cls.pems
+        Path(T, "chain.pem").write_text(cls.pems["inter"] + cls.pems["root"])
+        cls.srv = HTTPServer(("127.0.0.1", CPORT), CertHandler)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def setUp(self):
+        for k in ("sel", "verification", "ext_sec", "errlog"):
+            CSTATE.pop(k, None)
+
+    def gather(self, cert=None, chain=False, extra=(), **state):
+        CSTATE.update(state)
+        out = tempfile.mkdtemp(prefix="msg-out.", dir=self.tmp)
+        args = [sys.executable, "-I", str(SCRIPT), "certificate", "--host", "127.0.0.1", "--port", str(CPORT), "--scheme", "http", "--user", "admin", "--out", out, "--no-probe"]
+        if cert:
+            args += ["--client-cert", str(Path(self.tmp, cert + ".pem"))]
+        if chain:
+            args += ["--client-chain", str(Path(self.tmp, "chain.pem"))]
+        r = subprocess.run(args + list(extra), env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        summary = Path(out, "SUMMARY.md")
+        return r, (summary.read_text() if summary.exists() else "")
+
+    def test_only_app_servers_with_certificate_authentication_are_checked(self):
+        r, s = self.gather()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("### `cert-srv`", s)
+        self.assertNotIn("other-srv", s)
+        self.assertIn("no --client-cert given", s)
+
+    def test_a_working_certificate_passes_issuer_selection_and_maps_to_a_user(self):
+        r, s = self.gather("user1", chain=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*PASS\*\* \| cert-srv: every CA up to the root is selected")
+        self.assertRegex(s, r"\*\*PASS\*\* \| client certificate DN is the external name of a MarkLogic user \| `CN=user1.example.com,OU=TEST ONLY` -> u1")
+        self.assertIn("Subject DN as MarkLogic logs and compares it (the order stored in the certificate, comma, no space): `CN=user1.example.com,OU=TEST ONLY`", s)
+        self.assertIn("RFC 2253 order (openssl reverses it): `OU=TEST ONLY,CN=user1.example.com`", s)
+
+    def test_intermediate_only_fails_with_verification_false_and_passes_with_true(self):
+        r, s = self.gather("user1", sel=["inter"], verification=False)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: every CA up to the root is selected")
+        self.assertIn("`CN=Test-Root`", s)
+        r, s = self.gather("user1", sel=["inter"], verification=True)
+        self.assertRegex(s, r"\*\*PASS\*\* \| cert-srv: client certificate issuer is a selected client CA")
+        self.assertNotIn("every CA up to the root", s)
+
+    def test_root_only_or_an_unselected_issuer_fails(self):
+        r, s = self.gather("user1", chain=True, sel=["root"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: client certificate issuer is a selected client CA")
+        self.assertIn("A CA higher in the chain", s)
+        r, s = self.gather("foreign", sel=["root", "inter"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: client certificate issuer is a selected client CA")
+        self.assertIn("TLS alert 48", s)
+
+    def test_expired_and_server_only_certificates_are_named(self):
+        r, s = self.gather("expired")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| client certificate #1 expired")
+        self.assertIn("TLS alert 45", s)
+        r, s = self.gather("serveronly")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| client certificate: extended key usage allows client authentication")
+        self.assertIn("TLS alert 43", s)
+
+    def test_cn_only_external_name_and_unmapped_dn_are_told_apart(self):
+        r, s = self.gather("cnonly")
+        self.assertIn("which is only the CN", s)
+        self.assertIn("MarkLogic maps by the FULL subject DN", s)
+        r, s = self.gather("unmapped")
+        self.assertIn("no user has the external name `CN=nobody.example.com,OU=TEST ONLY`", s)
+
+    def test_no_selected_ca_and_no_external_security_are_failures(self):
+        r, s = self.gather(sel=[], ext_sec=False)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: a client certificate authority is selected")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: an external security profile is set")
+        self.assertIn("externalAuthenticate failed because no external security is configured", s)
+
+    def test_a_private_key_is_refused(self):
+        key = Path(self.tmp, "user1.key")
+        r, s = self.gather(extra=["--client-cert", str(key)])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("contains a private key", r.stderr)
+        self.assertNotIn("BEGIN", s)
+
+    def test_tls_alerts_are_explained_because_nothing_is_logged(self):
+        r, s = self.gather()
+        self.assertIn("48 unknown ca", s)
+        self.assertIn("nothing is written to the ErrorLog or AccessLog", s)
+
+    LOGWIN = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
+
+    def test_no_log_lines_for_a_tls_rejection_are_information_not_a_warning(self):
+        r, s = self.gather("expired", extra=self.LOGWIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*INFO\*\* \| no certificate login lines in the ErrorLog window")
+        self.assertNotIn("lines found in the ErrorLog window | none: trace events off", s)
+
+    def test_a_no_user_log_line_gets_the_full_dn_hint(self):
+        r, s = self.gather("unmapped", extra=self.LOGWIN, errlog=(
+            "2026-10-25 10:00:08.000 Info: [Event:id=External Authenticate] ExternalSecurity[cert-prof] certificateAuthenticate() fail because no user\n"
+            "2026-10-25 10:00:08.001 Info: [Event:id=External Authenticate] External authentication failed: user= dn=CN=nobody.example.com,OU=TEST ONLY\n"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| CERTIFICATE error, first at 2026-10-25 10:00:08.000")
+        self.assertIn("full subject DN shown in `dn=`", s)
+        self.assertIn("dn=CN=nobody.example.com,OU=TEST ONLY", s)
+
+    def test_the_ca_names_a_server_advertises_are_parsed(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        txt = ("---\nAcceptable client certificate CA names\nCN=Test-Intermediate\nCN=Test-Root\nRequested Signature Algorithms: ECDSA+SHA256\nShared Requested Signature Algorithms: x\n")
+        self.assertEqual(mod.parse_ca_names(txt), ["CN=Test-Intermediate", "CN=Test-Root"])
+        self.assertEqual(mod.parse_ca_names("No client certificate CA names sent\n"), [])
+
+    def test_the_trace_script_has_a_certificate_preset(self):
+        out = subprocess.run([sys.executable, "-I", str(SCRIPT.parent / "ml-trace-events.py"), "enable", "--help"], capture_output=True, text=True).stdout
+        self.assertIn("certificate", out)
+
+
 if __name__ == "__main__":
     unittest.main()
