@@ -52,6 +52,7 @@ PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----"
 PRIV_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
 NOW = dt.datetime.now(dt.timezone.utc)
 
+OAUTH_CTX = {}   # set by run_oauth for the log analysis: role map, role attribute, token expiry
 NONSAML_SERVERS = []   # bound app servers whose authentication is not saml (the trace still shows a redirect for them, but the client gets a password challenge)
 REPORT = []   # markdown lines
 NOT_COLLECTED = []   # (what, why, how to add it)
@@ -732,10 +733,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
                           "the trace shows `Group:` with no value other than the user name: the IdP sent no group values, so there is nothing to match to a role external name and the SAML identity gets no roles (HTTP 403). "
                           "Add the group attribute to the IdP's SAML response for this application (the attribute name does not matter; its values are matched to role external names)")
                 else:
-                    import difflib
-                    near = []
-                    for t in toks:
-                        near += [x for x in difflib.get_close_matches(t, list(role_map), n=2, cutoff=0.8) if x not in near]
+                    near = closest_names(toks, role_map)
                     check("FAIL", "Group values of %s map to a MarkLogic role" % user,
                           "none of `%s` equals the external-name of any role (case does not matter), so the SAML identity gets no roles%s" % (
                               grp, (". Closest role external name(s) among the %d on this cluster (external names are cluster-wide): %s: a difference of a character or two is the usual cause" % (len(role_map), ", ".join("`%s`" % x for x in near))) if near else ""))
@@ -1306,6 +1304,10 @@ def analyse_tls_chain(c, label, probe, host, check_ml_trust=False):
 
 # ---------------------------------------------------------------- generic logs (OAuth, LDAP, HTTPS)
 OAUTH_HINTS = [
+    (r"Response code: [45]\d\d Response: <", "The IdP answered a request of MarkLogic with an HTML page, not JSON: the URL is not the IdP's token endpoint (or the endpoint refused the request). Compare `oauth-token-server-uri` with the discovery document (the report lists both)."),
+    (r"JWT client id validation fails", "`oauth-client-id` of the profile is not the client id in the token (its `aud` or `azp`): MarkLogic checks it. Set `oauth-client-id` to the client id of the IdP application that issued the token."),
+    (r"token expiration", "MarkLogic reports signature, format and expiration with one message. If the signature check of `--token` passes, the usual cause is an expired token: compare the token's `exp` with the time of the request (MarkLogic tolerates a clock skew of several minutes), and request a new token."),
+    (r"invalid json", "The JWKS URI did not return a key set (a JSON document with a `keys` list): check `oauth-jwks-uri`; the report reads it from this machine and says what it answers."),
     (r"OAuth Error: 'invalid_request'", "The IdP refused the authorization request and sent the browser back with this error. In authentik the usual cause is that the provider does not allow the `authorization_code` grant type (the IdP's own log says `Invalid grant_type for provider`)."),
     (r"OAuth Error: 'invalid_client'|invalid_client", "The IdP does not accept the client id / client secret / authentication method that MarkLogic sent to the token endpoint."),
     (r"OAuth Error: 'invalid_grant'|invalid_grant", "The IdP rejected the authorization code (already used, expired after about a minute, or the redirect URI sent to the token endpoint differs from the one used to authorize)."),
@@ -1449,15 +1451,57 @@ def analyse_logs_generic(c, area, bound):
                         for h, ts, level, b in all_msgs]
         benign = r"External authentication failed: user=\s*$|stateVal: \(empty\)"
         errs = [(ts, scrub(b)[:160], level) for h, ts, level, b in all_msgs
-                if re.search(cfgl["error"], b) and not re.search(r"\bpass\b", b) and not re.search(benign, scrub(b))]
+                if re.search(cfgl["error"], b) and not re.search(r"\bpass\b", b) and not re.search(benign, scrub(b))
+                and "[Event:id=OAuth JSON Processing]" not in b]   # debug echoes of a response that another line already reports
         grouped, levels = {}, {}
         for ts, b, level in errs:
             grouped.setdefault(b, []).append(ts)
             levels[b] = level
+        if area == "oauth" and any(re.search(r"JWKS Response:\s*<(!DOCTYPE|html)", b, re.I) for _, _, _, b in all_msgs):
+            check("FAIL", "MarkLogic fetched an HTML page instead of the JWKS",
+                  "the trace line `JWKS Response:` holds an HTML page, not a key set (a JSON document with a `keys` list): the URL in `oauth-jwks-uri` is not the IdP's JWKS endpoint (or it refused the request). "
+                  "The login ends in HTTP 500 although the token request before it succeeded. Compare `oauth-jwks-uri` with the discovery document (the report lists both and reads the URL from this machine)")
+        if area == "oauth" and OAUTH_CTX.get("token_exp"):
+            for h, ts, level, b in all_msgs:
+                if "token expiration" in b or "JWT verification failed" in b:
+                    try:
+                        when = dt.datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
+                    except ValueError:
+                        break
+                    if OAUTH_CTX["token_exp"] < when:
+                        check("FAIL", "the token was expired when it was used",
+                              "its `exp` is %d s before the failed request at %s (log time read as UTC; MarkLogic tolerates a clock skew of several minutes, so a smaller difference would be accepted). "
+                              "MarkLogic reports signature, format and expiration with one message: this token's signature checks out, so request a new token" % (when - OAUTH_CTX["token_exp"], ts[:19]))
+                    break
         for msg, times in list(grouped.items())[:15]:
             hint = next((t for pat, t in cfgl["hints"] if re.search(pat, msg)), None)
             check("WARN" if levels[msg] == "Warning" else "FAIL", "%s %s, first at %s (%d time%s)" % (area.upper(), "warning" if levels[msg] == "Warning" else "error", times[0], len(times), "" if len(times) == 1 else "s"),
                   "`%s`%s" % (msg, (" - " + hint) if hint else ""))
+        if area == "oauth" and OAUTH_CTX.get("role_map") is not None:
+            seen_r = set()
+            for h, ts, level, b in all_msgs:
+                m = re.search(r"OAuth Authentication with Username: \[(.*?)\](?: Roles: \[(.*?)\])?\s*$", b)
+                if not m or (m.group(1), m.group(2)) in seen_r:
+                    continue
+                seen_r.add((m.group(1), m.group(2)))
+                user, roles = m.group(1), m.group(2)
+                attr = OAUTH_CTX.get("attr") or "oauth-role-attribute"
+                if roles is None:
+                    check("FAIL", "the token for %s carries no role claim values" % user,
+                          "the trace line has no `Roles:` list: the token has no value in the role claim `%s` of the profile, so there is nothing to match to a role external name and the login gets no roles (HTTP 403). "
+                          "The IdP does not put the claim in the token: for the authorization code flow check the scopes the profile requests and the IdP's scope or property mapping" % attr)
+                    continue
+                vals = [v.strip() for v in roles.split(",") if v.strip()]
+                lower = {k.lower(): (k, v) for k, v in OAUTH_CTX["role_map"].items()}
+                hit = {v: lower[v.lower()] for v in vals if v.lower() in lower}
+                if hit:
+                    check("PASS", "role claim values of %s map to MarkLogic roles" % user,
+                          "; ".join("`%s` -> %s" % (v, ", ".join(r)) for v, (k, r) in hit.items()))
+                else:
+                    near = closest_names(vals, OAUTH_CTX["role_map"])
+                    check("FAIL", "role claim values of %s map to a MarkLogic role" % user,
+                          "the trace shows the claim values `%s` (read from `%s`): none equals the external name of any role, so the login gets no roles (HTTP 403)%s. If the roles are in another claim, set oauth-role-attribute to it" % (
+                              roles, attr, (". Closest role external name(s) among the %d on this cluster: %s" % (len(OAUTH_CTX["role_map"]), ", ".join("`%s`" % x for x in near))) if near else ""))
         if area == "oauth":
             redirects = sum(1 for _, _, _, b in all_msgs if re.search(r"OAuth redirect URI: https?://\S*(authorize|auth)", b))
             callbacks = sum(1 for _, _, _, b in all_msgs if "via the 'authorization_code' flow" in b or "OAuth Error" in b)
@@ -1493,6 +1537,10 @@ def analyse_logs_generic(c, area, bound):
                 check("INFO", "401 responses in the window", "%d: authentication was refused; see the error lines in the ErrorLog" % n401)
             if n403:
                 check("INFO", "403 responses in the window", "%d: the user authenticated but lacks a role or privilege for the URL (authorization failures are in the AccessLog, not the ErrorLog)" % n403)
+            if n403 and area == "oauth" and any("OAuth authenticated!" in b for _, _, _, b in all_msgs):
+                check("WARN", "OAuth login passed, then the request was refused (403)",
+                      "%d x 403 after `OAuth authenticated!`: the token was accepted and the user identified, but the roles it granted do not give the privilege the URL needs (or it granted none). The roles come from the claim "
+                      "`%s` of the profile: compare them with the role claim checks above, and if the intended roles are in another claim set oauth-role-attribute to it" % (n403, OAUTH_CTX.get("attr") or "oauth-role-attribute"))
             if n403 and area == "certificate" and any(re.search(r"certificateAuthenticate\(\) pass", b) for _, _, _, b in all_msgs):
                 check("WARN", "certificate login passed, then the request was refused (403)",
                       "%d x 403 after `certificateAuthenticate() pass`: the certificate was accepted and the user identified, but has no role for the URL. With authorization `ldap` the user's memberOf group DNs "
@@ -1599,6 +1647,8 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
     say("- Claim names: %s" % ", ".join("`%s`" % k for k in claims))
     iss, aud = claims.get("iss"), claims.get("aud")
     say("- iss: `%s`; aud: `%s`; azp: `%s`" % (iss, aud, claims.get("azp")))
+    if isinstance(claims.get("exp"), (int, float)):
+        OAUTH_CTX["token_exp"] = claims["exp"]
     for k in ("iat", "nbf", "exp"):
         if isinstance(claims.get(k), (int, float)):
             say("- %s: %s UTC" % (k, dt.datetime.fromtimestamp(claims[k], dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
@@ -1612,8 +1662,11 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
     cid = cfg.get("oauth-client-id")
     if cid and (aud is not None or claims.get("azp")):
         auds = aud if isinstance(aud, list) else [aud]
-        check("PASS" if (cid in auds or claims.get("azp") == cid) else "WARN", "token audience / authorized party contains the client id",
-              "client id `%s` / aud `%s` / azp `%s`" % (cid, aud, claims.get("azp")))
+        ok = cid in auds or claims.get("azp") == cid
+        check("PASS" if ok else "FAIL", "token audience / authorized party contains the client id",
+              ("client id `%s` / aud `%s` / azp `%s`" % (cid, aud, claims.get("azp"))) if ok else
+              "oauth-client-id `%s` is neither the token's aud (%s) nor its azp (%s). MarkLogic 11.3.7 checks the client id and refuses the token with `XDMP-OAUTH: JWT client id validation fails` (HTTP 500). "
+              "Set oauth-client-id to the client id of the application that issued the token" % (cid, aud, claims.get("azp")))
     ua = cfg.get("oauth-username-attribute")
     if ua:
         check("PASS" if ua in claims else "FAIL", "token has the username claim `%s`" % ua, "claim names: %s" % ", ".join(claims))
@@ -1622,7 +1675,9 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
         vals = claims.get(ra)
         vals = [] if vals is None else ([vals] if not isinstance(vals, list) else vals)
         if not vals:
-            check("WARN", "token has role claim values in `%s`" % ra, "claim missing or empty")
+            check("FAIL" if str(cfg.get("authorization")) == "oauth" else "WARN", "token has role claim values in `%s`" % ra,
+                  "the token has no `%s` claim (or it is empty), so there is nothing to match to a role external name and the login gets no roles (HTTP 403). "
+                  "The IdP does not put the claim in this token: check the IdP's scope or property mapping for the application, and that the scope that carries it is requested" % ra)
         elif role_map is not None:
             hit = {str(v): role_map[str(v)] for v in vals if str(v) in role_map}
             if hit:
@@ -1636,9 +1691,11 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
                     m = [str(v) for v in cv if isinstance(v, (str, int)) and str(v) in role_map]
                     if m:
                         other.append("`%s` (%s)" % (cn, ", ".join(m)))
+                near = closest_names([str(v) for v in vals], role_map)
                 check("FAIL", "role claim values map to a MarkLogic role",
-                      "none of the %d value(s) in `%s` equals the external name of any role%s" % (len(vals), ra,
-                      ". Another claim does match: %s. If that is the claim that carries the roles, set `oauth-role-attribute` to it" % "; ".join(other) if other else ""))
+                      "none of the %d value(s) in `%s` equals the external name of any role%s%s" % (len(vals), ra,
+                      (". Another claim does match: %s. If that is the claim that carries the roles, set `oauth-role-attribute` to it" % "; ".join(other)) if other else "",
+                      (". Closest role external name(s) among the %d on this cluster: %s: a difference of a character or two is the usual cause" % (len(role_map), ", ".join("`%s`" % x for x in near))) if near and not other else ""))
     if alg == "RS256" and jwks:
         keys = [k for k in jwks.get("keys", []) if k.get("kty") == "RSA"]
         cand = [k for k in keys if k.get("kid") == kid] or ([] if kid else keys)
@@ -1692,9 +1749,25 @@ def run_oauth(c):
         if is_ac:
             say("Authorization code flow: the client secret and redirect URI must match the client registered at the IdP (not readable from here).")
             say("")
+        if str(cfg.get("authorization")) == "internal":
+            check("INFO", "%s: authorization is internal" % n,
+                  "the token's role claim is not used: the roles are those of the MarkLogic user whose name is the token's username claim (`%s`). A bearer token is still accepted; make sure such a user exists "
+                  "(guidance, not a fault of the login itself)" % (cfg.get("oauth-username-attribute") or "oauth-username-attribute"))
         if not cfg.get("oauth-username-attribute"):
             check("WARN", "%s: oauth-username-attribute is set" % n, "empty")
     bound = bound_servers(c, set(profiles)) if profiles else []
+    for b in bound:
+        sp = b["props"]
+        if str(first(sp, "authentication")) != "oauth":
+            check("WARN", "app server %s uses oauth authentication" % b["name"],
+                  "authentication is `%s`, not `oauth`, although an OAuth profile is attached: the app server asks for a `%s` login and never evaluates a bearer token or starts the authorization flow. "
+                  "Set the app server's authentication to oauth" % (first(sp, "authentication"), first(sp, "authentication")))
+        for pn in [str(x) for x in find_all(sp, "external-security")]:
+            pc = cfgs.get(pn) or {}
+            if str(pc.get("oauth-redirect-uri") or "").startswith("https://") and not first(sp, "ssl-certificate-template"):
+                check("FAIL", "app server %s serves the https redirect URI of profile %s" % (b["name"], pn),
+                      "the profile's redirect URI `%s` is https but the app server has no certificate template, so it speaks plain HTTP: the IdP posts the authorization code to an https URL this port does not answer, "
+                      "and the login stops at the IdP. Give the app server a certificate template, or change the redirect URI (and the IdP registration) to http" % pc.get("oauth-redirect-uri"))
     role_map = None
     if profiles and any(str(cfg.get("authorization")) == "oauth" for cfg in cfgs.values()):
         role_map = load_role_map(c.api, c.out, c.errors)
@@ -1749,11 +1822,14 @@ def run_oauth(c):
                         say("  - kid `%s`, kty `%s`, alg `%s`, use `%s`%s" % (k.get("kid"), k.get("kty"), k.get("alg"), k.get("use"), exp))
             else:
                 missing("JWKS check of profile `%s`" % n, "no oauth-jwks-uri and no discovery document", "set oauth-jwks-uri, or allow the discovery document to be read")
-            hosts = set()
+            hosts, contacted = set(), set()
             for u in (iss, cfg.get("oauth-authorization-server-uri"), cfg.get("oauth-token-server-uri"), ju):
                 m = re.match(r"https://([^/:]+)(?::(\d+))?", u or "")
                 if m:
                     hosts.add((m.group(1), m.group(2) or "443"))
+                    # MarkLogic itself connects to the JWKS URI (and, in the authorization code flow, the token endpoint); the issuer is only compared as a string and the browser uses the authorization URL
+                    if u in (ju, cfg.get("oauth-token-server-uri") if is_ac else None):
+                        contacted.add((m.group(1), m.group(2) or "443"))
             for h, port in sorted(hosts):
                 if (h, port) in c.probed:
                     say("- TLS of %s:%s: same as reported above" % (h, port))
@@ -1761,7 +1837,7 @@ def run_oauth(c):
                 c.probed.add((h, port))
                 pr = tls_probe(h, port)
                 analyse_tls_chain(c, "IdP endpoint %s:%s" % (h, port), pr, h, check_ml_trust=True)
-                if c.major and c.major < 12 and not pr.get("error") and legacy_client_probe(h, port) is False:
+                if c.major and c.major < 12 and not pr.get("error") and (h, port) in contacted and legacy_client_probe(h, port) is False:
                     check("FAIL", "IdP endpoint %s:%s accepts MarkLogic %s's HTTPS client" % (h, port, c.version),
                           "a TLS 1.2 handshake without the extended master secret extension is refused (the IdP needs TLS 1.3 or that extension, "
                           "for example a Go server in FIPS mode). MarkLogic 11's client offers neither, so fetching the JWKS fails with "
@@ -1787,6 +1863,7 @@ def run_oauth(c):
     elif profiles:
         missing("Token comparison", "no --token given", "add --token <file> (an access token, or an Authorization header line, from a failed request)")
     if a.logs:
+        OAUTH_CTX.update(role_map=role_map, attr=(next(iter(cfgs.values())).get("oauth-role-attribute") if len(cfgs) == 1 else (cfgs.get(a.external_security) or {}).get("oauth-role-attribute")))
         analyse_logs_generic(c, "oauth", bound)
     elif profiles:
         missing("ErrorLog, AccessLog and trace-event status", "--logs not given",
@@ -2737,22 +2814,42 @@ def run_saml(c):
         analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors)
 
 
+def closest_names(values, names, n=2):
+    """Role external names that differ from a value by a character or two (difflib), best first."""
+    import difflib
+    near = []
+    for t in values:
+        near += [x for x in difflib.get_close_matches(str(t), list(names), n=n, cutoff=0.8) if x not in near]
+    return near
+
+
 def conclusion_lines(checks, not_collected, errors):
     """One engineer-readable verdict for the top of the report: all good, or the first failure to look at."""
     uniq = list(dict.fromkeys(checks))
     fails = [x for x in uniq if x[0] == "FAIL"]
     warns = [x for x in uniq if x[0] == "WARN"]
 
-    def first_sentence(text, limit=420):
+    def first_sentence(text, limit=460, max_sentences=2):
+        """The first one or two sentences of a detail (a log message with its explanation: the explanation)."""
         text = text.strip()
-        m = re.search(r"(?<=[a-z0-9`)])\. (?=[A-Z`])", text[:limit + 80])
-        cut = text[:m.start() + 1] if m and m.start() >= 40 else text[:limit]
-        cut = cut if cut.endswith((".", ":")) else cut.rstrip(" ,;") + ("..." if len(text) > len(cut) else ".")
-        return cut[:1].upper() + cut[1:]
+        hm = re.match(r"^`.*?` - (.*)$", text, re.S)
+        if hm:
+            text = hm.group(1).strip()
+        parts = re.split(r"(?<=[a-z0-9`)])\. (?=[A-Z`])", text)
+        kept = parts[0]
+        for extra in parts[1:max_sentences]:
+            if len(kept) + len(extra) + 2 <= limit:
+                kept += ". " + extra
+        if len(kept) > limit:
+            kept = kept[:limit].rstrip(" ,;") + "..."
+        elif not kept.endswith((".", ":", "...")):
+            kept += "."
+        return kept[:1].upper() + kept[1:] if re.match(r"[a-z]+( |$)", kept) else kept
 
     out = ["## Conclusion", ""]
     if fails:
-        r, n, d = fails[0]
+        # a bare log line without an explanation is a symptom: prefer the first failure that explains itself
+        r, n, d = next((x for x in fails if not (" error, first at " in x[1] and " - " not in x[2])), fails[0])
         out.append("**Root cause to look at first: %s**" % n)
         out.append("")
         out.append(first_sentence(d))
