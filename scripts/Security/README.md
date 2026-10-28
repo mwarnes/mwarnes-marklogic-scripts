@@ -20,6 +20,7 @@ Only `--host` and `--user` are required, and the script is meant to be run as th
 is skipped and listed in the **Not collected** table of `SUMMARY.md` with the option that adds it. The password comes from
 `MARKLOGIC_PASS` (or a prompt), never from the command line. Passwords, private keys and client secrets are removed before
 anything is written. Output: `./<area>-gather-<timestamp>/` with `SUMMARY.md`, the raw JSON, filtered logs and a `.zip`.
+`SUMMARY.md` opens with a **Conclusion**: "All good" when no check failed or warned, or the first failure as the root cause to look at first (later failures are often consequences of it). It says how many parts were not collected, because a verdict covers only what was collected.
 
 Requirements: `python3` (standard library only), `curl`, `openssl`. Tests: `python3 -m unittest discover -s scripts/Security/tests`.
 
