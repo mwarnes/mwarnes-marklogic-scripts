@@ -1339,11 +1339,12 @@ HTTPS_HINTS = [
     (r"no shared cipher|handshake failure|wrong version number|protocol version", "Protocol or cipher mismatch between client and app server (check the app server's TLS settings)."),
 ]
 CERT_HINTS = [
+    (r"fail because external name", "MarkLogic identified the user (the `certificateAuthenticate() pass ... user <name>` line before it) but the user's external name is not equal to the certificate DN as MarkLogic renders it: the attribute type names (CN=, OU=, O=) are compared case-sensitively, unlike role external names. Make the external name identical to the DN, type names in capitals as in the report."),
+    (r"fail because no client certificate", "The request carried no client certificate. With `ssl-require-client-certificate` true TLS refuses such a client before this line; the line appears when a certificate is optional (false) and none was sent, or by a client that sent none through a proxy."),
     (r"certificateAuthenticate\(\) fail because unknown user", "Authorization `ldap`: MarkLogic searched the directory for this exact DN (a base-scope search whose base is the certificate's subject DN in stored order) and found no usable user. This is NOT the internal-authorization `no user`: no MarkLogic user is involved. Four causes write this same line: the DN is reversed or not the entry's DN; the entry does not exist; `ldap-attribute` is not an attribute of the entry; the search account cannot read the entry. The directory's access log tells them apart (see the certificate DN section of this report for the ldapsearch to run)."),
     (r"not found in ldapUserCache", "The DN in this line is the exact string MarkLogic searches for in the directory (stored order of the certificate). Compare it with the entry's DN."),
     (r"XDMP-LDAP-INVALID-CRED", "The directory refused the bind (error 49): wrong password (or DN) of the search account `ldap-default-user` of the profile. The client certificate is not the problem."),
     (r"certificateAuthenticate\(\) fail because no user", "TLS accepted the certificate, but no MarkLogic user has an external name equal to the full subject DN shown in `dn=`. MarkLogic compares the whole DN as it logs it (CN first, comma, no space); a user whose external name is only the CN does not match. Give a user that exact DN as external name (the certificate section of this report lists near-misses)."),
-    (r"fail because no client certificate", "The client sent no certificate although the app server needs one."),
     (r"no external security is configured", "The app server has no external security profile: create a profile with authentication `certificate` (authorization `internal`) and select it on the app server."),
     (r"Duplicate certificate subject", "Two certificates in the Security database share a subject; see the table of duplicate subjects in this report. It appeared after client certificate authorities were selected in the lab tests; usually harmless."),
     (r"certificateAuthenticate", "The certificate login failed after the TLS handshake; the message and the dn it shows say which certificate was presented."),
@@ -2341,9 +2342,23 @@ def check_client_cert(c, a, servers, profs=None):
         cn_only = [(en, us) for en, us in umap.items() if cn and en == cn]
         like = [(en, us) for en, us in umap.items() if cn and cn in en and en != dn and (en, us) not in near and (en, us) not in cn_only][:5]
         if near:
-            check("WARN", "client certificate DN matches an external name only after normalising",
+            check("FAIL", "client certificate DN matches an external name only after normalising",
                   "%s: same attributes but another case, spacing or order. MarkLogic compares the DN exactly as it logs it (`%s`): make the external name identical" % (
                       "; ".join("`%s` (user %s)" % (en, ", ".join(us)) for en, us in near), dn))
+        elif [x for x in umap if dn_key(x) < dn_key(dn) or dn_key(x) > dn_key(dn)]:
+            sub = [(en, us) for en, us in umap.items() if dn_key(en) < dn_key(dn)]
+            sup = [(en, us) for en, us in umap.items() if dn_key(en) > dn_key(dn)]
+            rdn_of = lambda d: [r for r in d.split(",") if r.strip()]
+            parts = []
+            for en, us in sub:
+                extra = [r for r in rdn_of(dn) if dn_norm(r) not in dn_key(en)]
+                parts.append("the DN has the extra RDN(s) `%s` that the external name `%s` (user %s) lacks" % (", ".join(extra), en, ", ".join(us)))
+            for en, us in sup:
+                extra = [r for r in rdn_of(en) if dn_norm(r) not in dn_key(dn)]
+                parts.append("the external name `%s` (user %s) has the extra RDN(s) `%s` that the DN lacks" % (en, ", ".join(us), ", ".join(extra)))
+            check("FAIL", "client certificate DN is the external name of a MarkLogic user",
+                  "no user has the external name `%s`, but a near miss exists: %s. MarkLogic compares the whole DN, so one RDN more or less means no user: `certificateAuthenticate() fail because no user` (HTTP 401). "
+                  "Make the external name equal to the DN (or have the certificate issued with the DN the user expects)" % (dn, "; ".join(parts)))
         elif cn_only:
             check("FAIL", "client certificate DN is the external name of a MarkLogic user",
                   "user(s) %s have the external name `%s`, which is only the CN. MarkLogic maps by the FULL subject DN, so the login fails with `certificateAuthenticate() fail because no user`. "
@@ -2437,7 +2452,7 @@ def run_certificate(c):
                 if s.get("not_after") and s["not_after"] < NOW:
                     check("FAIL", "%s: selected client CA `%s` is valid" % (nm, s.get("subject")), "expired %s: client certificates it issued are rejected (TLS alert 45)" % fmt_dt(s["not_after"]))
             say("")
-        else:
+        elif first(sp, "ssl-certificate-template"):
             check("FAIL", "%s: a client certificate authority is selected" % nm,
                   "none selected: the server never asks for a client certificate, so certificate authentication cannot work. Select the CA(s) in the app server's client certificate authorities")
         if sel and not verification:
@@ -2446,6 +2461,18 @@ def run_certificate(c):
         if not require:
             say("- A client certificate is not required (`ssl-require-client-certificate` false).")
             say("")
+            check("INFO", "%s: a client certificate is not required" % nm,
+                  "ssl-require-client-certificate is false: a client without a certificate is not refused by TLS, it reaches the application, which answers 401 instead of a TLS failure. "
+                  "Set it to true if a certificate must be mandatory")
+        if c.major and c.major < 12 and all(str(sp.get(k)).lower() == "true" for k in ("ssl-disable-sslv3", "ssl-disable-tlsv1", "ssl-disable-tlsv1-1", "ssl-disable-tlsv1-2")):
+            check("FAIL", "%s: no TLS version is usable" % nm,
+                  "TLS 1.2 and every older version are disabled (ssl-disable-*), and MarkLogic 11.3.7 does not serve TLS 1.3 (its app servers refuse a TLS 1.3 handshake: the `https` area's version probe shows TLSv1.3 refused, "
+                  "and a TLS 1.3 client is reset on this port). Every client, whatever it offers, fails the handshake (curl: connection reset, exit 35) and nothing is written to the logs. "
+                  "Enable TLS 1.2 again (ssl-disable-tlsv1-2 false); TLS 1.3 needs MarkLogic 12")
+        elif re.search(r"minimum TLSv?1\.3$", policy):
+            check("WARN", "%s: only TLS 1.3 is allowed" % nm,
+                  "TLS protocols: %s. A client that offers TLS 1.2 or lower (an older library, curl with --tls-max 1.2) fails the handshake and nothing is written to the logs; the client sees a handshake failure. "
+                  "Allow TLS 1.2 as well, or use a TLS 1.3 client" % policy)
         tmpl = first(sp, "ssl-certificate-template")
         if tmpl:
             td = c.fetch("/manage/v2/certificate-templates/%s?format=json" % q(tmpl), "certificate-template-%s.json" % slug(tmpl))
@@ -2849,17 +2876,27 @@ def conclusion_lines(checks, not_collected, errors):
     out = ["## Conclusion", ""]
     if fails:
         # a bare log line without an explanation is a symptom: prefer the first failure that explains itself
-        r, n, d = next((x for x in fails if not (" error, first at " in x[1] and " - " not in x[2])), fails[0])
+        r, n, d = next((x for x in fails if not (" error, first at " in x[1] and " - " not in x[2]) and len(x[2]) >= 40), None) or \
+            next((x for x in fails if not (" error, first at " in x[1] and " - " not in x[2])), fails[0])
         out.append("**Root cause to look at first: %s**" % n)
         out.append("")
         out.append(first_sentence(d))
         out.append("")
         out.append("(%d failure(s) and %d warning(s) in total. The table \"Check results\" near the end lists them all, failures first; later failures are often consequences of the first.)" % (len(fails), len(warns)))
     elif warns:
-        r, n, d = warns[0]
-        out.append("**No failure found. %d warning(s); look at: %s**" % (len(warns), n))
-        out.append("")
-        out.append(first_sentence(d))
+        stalled = [x for x in uniq if x[0] in ("WARN", "INFO") and re.search(r"never came back|no SAML response came back", x[1])]
+        ranked = sorted(warns, key=lambda x: ("expires soon" in x[1], bool(re.search(r"never came back", x[1]))))   # expiry and the symptom last
+        r, n, d = ranked[0]
+        if stalled:
+            out.append("**Probable cause: %s**" % n)
+            out.append("")
+            out.append(first_sentence(d))
+            out.append("")
+            out.append("(%d warning(s) and no failure, but the login did not complete: the browser was sent to the IdP and no response came back.)" % len(warns))
+        else:
+            out.append("**No failure found. %d warning(s); look at: %s**" % (len(warns), n))
+            out.append("")
+            out.append(first_sentence(d))
     elif uniq:
         out.append("**All good: no failure and no warning in what was collected.**")
     else:
