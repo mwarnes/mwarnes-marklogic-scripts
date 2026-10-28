@@ -51,7 +51,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "oa"}, {"nameref": "ld"}] + ([{"nameref": "ob"}] if STATE.get("extra_oauth") else [])},
                                      "relations": {"relation": [{"nameref": "Security"}]}}})
         if p in ("/manage/v2/external-security/oa/properties", "/manage/v2/external-security/ob/properties"):
-            return self.reply({"external-security-name": "oa", "authentication": "oauth", "authorization": "oauth", "oauth-server": {
+            return self.reply({"external-security-name": "oa", "authentication": "oauth", "authorization": STATE.get("authz", "oauth"), "oauth-server": {
+                **({"oauth-redirect-uri": STATE["redirect_uri"]} if STATE.get("redirect_uri") else {}),
                 "oauth-flow-type": STATE["flow"], "oauth-vendor": "Other", "oauth-client-id": "client", "oauth-jwt-issuer-uri": ISS,
                 "oauth-jwks-uri": "http://127.0.0.1:%d/jwks" % PORT, "oauth-jwt-alg": "RS256",
                 "oauth-username-attribute": "preferred_username", "oauth-role-attribute": "groups", "oauth-client-secret": "SECRETVALUE"}})
@@ -61,7 +62,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/manage/v2/servers":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "api", "groupnameref": "Default"}]}}})
         if p == "/manage/v2/servers/api/properties":
-            return self.reply({"port": 9100, "authentication": "oauth", "external-security": ["oa", "ld"]})
+            return self.reply({"port": 9100, "authentication": STATE.get("api_auth", "oauth"), "external-security": ["oa", "ld"],
+                               **({"ssl-certificate-template": "T"} if STATE.get("api_tpl") else {})})
         if p == "/manage/v2/roles":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "reader"}]}}})
         if p == "/manage/v2/roles/reader/properties":
@@ -96,6 +98,8 @@ class GatherTests(unittest.TestCase):
 
     def setUp(self):
         STATE.update(version="12.1.0", flow="Resource server")
+        for k in ("authz", "redirect_uri", "api_auth", "api_tpl"):
+            STATE.pop(k, None)
 
     def jwt(self, claims, kid="k1", tamper=False):
         h = b64(json.dumps({"alg": "RS256", "kid": kid, "typ": "JWT"}).encode())
@@ -301,11 +305,123 @@ class GatherTests(unittest.TestCase):
         text = "\n".join(warn)
         self.assertIn("**No failure found. 1 warning(s); look at: something odd**", text)
         self.assertIn("1 part(s) were not collected", text)
-        fail = "\n".join(mod.conclusion_lines([("PASS", "a", ""), ("FAIL", "the thing", "the thing is broken in this and that way, and this sentence is long enough. Second sentence."), ("FAIL", "other", "x")], [], []))
+        fail = "\n".join(mod.conclusion_lines([("PASS", "a", ""), ("FAIL", "the thing", "the thing is broken in this and that way, and this sentence is long enough. Second sentence. Third sentence."), ("FAIL", "other", "x")], [], []))
         self.assertIn("**Root cause to look at first: the thing**", fail)
-        self.assertIn("The thing is broken in this and that way, and this sentence is long enough.", fail)
-        self.assertNotIn("Second sentence", fail)
+        self.assertIn("The thing is broken in this and that way, and this sentence is long enough. Second sentence.", fail)
+        self.assertNotIn("Third sentence", fail)
+        hintless = "\n".join(mod.conclusion_lines([("FAIL", "OAUTH error, first at 2026-01-01 10:00:00.000 (1 time)", "`[Event:id=OAuth Status] bare line`"),
+                                                  ("FAIL", "OAUTH error, first at 2026-01-01 10:00:01.000 (1 time)", "`[Event:id=OAuth Status] other line` - The explained cause is here. More about it.")], [], []))
+        self.assertIn("The explained cause is here. More about it.", hintless)
         self.assertIn("2 failure(s) and 0 warning(s)", fail)
+
+    def test_an_oauth_profile_on_an_app_server_that_is_not_oauth_is_warned_about(self):
+        STATE["api_auth"] = "basic"
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*WARN\*\* \| app server api uses oauth authentication \| authentication is `basic`, not `oauth`")
+        STATE["api_auth"] = "oauth"
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertNotIn("uses oauth authentication", s)
+
+    def test_an_http_app_server_with_an_https_redirect_uri_fails(self):
+        STATE.update(flow="Authorization code", redirect_uri="https://ml.example.com:9100")
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| app server api serves the https redirect URI of profile oa")
+        STATE["api_tpl"] = True
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertNotIn("serves the https redirect URI", s)
+
+    def test_authorization_internal_is_guidance_for_oauth(self):
+        STATE["authz"] = "internal"
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertRegex(s, r"\*\*INFO\*\* \| oa: authorization is internal")
+        self.assertNotRegex(s, r"\*\*FAIL\*\* \| oa: authorization")
+
+    def test_a_token_for_another_client_id_fails(self):
+        good = {"iss": ISS, "aud": "client", "exp": int(time.time()) + 600, "preferred_username": "alice", "groups": ["ml-readers"]}
+        s = self.token_summary("tok-cid", self.jwt(dict(good, aud="someone-else")))
+        self.assertRegex(s, r"\*\*FAIL\*\* \| token audience / authorized party contains the client id")
+        self.assertIn("JWT client id validation fails", s)
+
+    def test_new_oauth_log_hints(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        STATE["errlog_extra"] = ("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] XDMP-OAUTH: JWT client id validation fails\n"
+                                 "2026-10-25 10:00:09.000 Info: [Event:id=OAuth Status] XDMP-OAUTH: JWT verification failed. Please check the JWT signature, token format and token expiration\n"
+                                 "2026-10-25 10:00:10.000 Info: [Event:id=OAuth Status] XDMP-INTERNAL: invalid json while reading the key set\n")
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *win)
+        finally:
+            STATE.pop("errlog_extra", None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("is not the client id in the token", s)
+        self.assertIn("one message. If the signature check of `--token` passes, the usual cause is an expired token", s)
+        self.assertIn("did not return a key set", s)
+
+    OWIN = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+
+    def oauth_logs(self, errlog, *extra, access=""):
+        STATE["errlog_extra"] = errlog
+        if access:
+            STATE["access_extra"] = access
+        try:
+            r, s, out = self.run_gather("oauth", "--external-security", "oa", *(list(self.OWIN) + list(extra)))
+        finally:
+            STATE.pop("errlog_extra", None)
+            STATE.pop("access_extra", None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return s
+
+    def test_role_claim_values_in_the_trace_are_matched_to_role_external_names(self):
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] OAuth Authentication with Username: [bob] Roles: [ml-reader]\n")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| role claim values of bob map to a MarkLogic role")
+        self.assertIn("Closest role external name(s) among the 1 on this cluster: `ml-readers`", s)
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] OAuth Authentication with Username: [bob] Roles: [ML-Readers]\n")
+        self.assertRegex(s, r"\*\*PASS\*\* \| role claim values of bob map to MarkLogic roles \| `ML-Readers` -> reader")
+
+    def test_a_trace_line_without_roles_means_the_token_has_no_role_claim(self):
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] OAuth Authentication with Username: [bob]\n")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| the token for bob carries no role claim values")
+
+    def test_json_processing_echoes_are_not_error_rows_and_an_html_answer_gets_a_hint(self):
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Communications] Response code: 403 Response: <!DOCTYPE html> <html> the request failed\n"
+                            "2026-10-25 10:00:08.001 Info: [Event:id=OAuth JSON Processing] Extracting key: 'error' from: <!DOCTYPE html> <html>\n"
+                            "2026-10-25 10:00:08.002 Info: [Event:id=OAuth JSON Processing] Unable to process text as JSON: <!DOCTYPE html>\n")
+        self.assertNotIn("Extracting key", s.split("## Check results")[1])
+        self.assertNotIn("Unable to process text as JSON", s.split("## Check results")[1])
+        self.assertIn("the URL is not the IdP's token endpoint", s)
+
+    def test_an_expired_token_is_named_when_the_token_and_the_failed_request_are_known(self):
+        import calendar
+        exp = calendar.timegm((2026, 10, 25, 9, 0, 0))
+        f = Path(self.tmp, "tok-expired")
+        f.write_text(self.jwt({"iss": ISS, "aud": "client", "exp": exp, "preferred_username": "alice", "groups": ["ml-readers"]}))
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] JWT verification failed. Please check the JWT signature, token format and token expiration.\n", "--token", str(f))
+        self.assertRegex(s, r"\*\*FAIL\*\* \| the token was expired when it was used")
+
+    def test_an_html_page_instead_of_the_jwks_is_named(self):
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Communications] JWKS Response:      <!DOCTYPE html> <html lang=\"en\"> <head>\n")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| MarkLogic fetched an HTML page instead of the JWKS")
+
+    def test_an_oauth_login_that_passed_and_got_403_is_explained(self):
+        s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] OAuth authenticated!\n",
+                            access='203.0.113.9 - bob [25/Oct/2026:10:00:09 +0000] "GET /v1/x HTTP/1.1" 403 0 - "curl"\n')
+        self.assertRegex(s, r"\*\*WARN\*\* \| OAuth login passed, then the request was refused \(403\)")
+
+    def test_a_missing_role_claim_in_the_token_fails_and_a_near_miss_names_the_closest_role(self):
+        good = {"iss": ISS, "aud": "client", "exp": int(time.time()) + 600, "preferred_username": "alice"}
+        s = self.token_summary("tok-noroles", self.jwt(dict(good)))
+        self.assertRegex(s, r"\*\*FAIL\*\* \| token has role claim values in `groups`")
+        s = self.token_summary("tok-near", self.jwt(dict(good, groups=["ml-reader"])))
+        self.assertIn("Closest role external name(s) among the 1 on this cluster: `ml-readers`", s)
+
+    def test_a_url_is_not_capitalised_in_the_conclusion(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = "\n".join(mod.conclusion_lines([("FAIL", "JWKS readable", "https://idp.example.com/jwks: HTTP 404.")], [], []))
+        self.assertIn("https://idp.example.com/jwks: HTTP 404.", text)
+        self.assertNotIn("Https://", text)
 
     def test_minimal_run_lists_what_was_not_collected(self):
         r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
