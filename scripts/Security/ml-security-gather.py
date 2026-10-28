@@ -738,7 +738,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
                         near += [x for x in difflib.get_close_matches(t, list(role_map), n=2, cutoff=0.8) if x not in near]
                     check("FAIL", "Group values of %s map to a MarkLogic role" % user,
                           "none of `%s` equals the external-name of any role (case does not matter), so the SAML identity gets no roles%s" % (
-                              grp, (". Closest role external name(s): %s: a difference of a character or two is the usual cause" % ", ".join("`%s`" % x for x in near)) if near else ""))
+                              grp, (". Closest role external name(s) among the %d on this cluster (external names are cluster-wide): %s: a difference of a character or two is the usual cause" % (len(role_map), ", ".join("`%s`" % x for x in near))) if near else ""))
             say("With authorization `saml` the assertion's group values are matched, ignoring case, to roles' external names (roles-external-names.json lists them). The name of the assertion attribute that carries them does not matter.")
             say("")
     if mapped_rows:
@@ -2737,6 +2737,47 @@ def run_saml(c):
         analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors)
 
 
+def conclusion_lines(checks, not_collected, errors):
+    """One engineer-readable verdict for the top of the report: all good, or the first failure to look at."""
+    uniq = list(dict.fromkeys(checks))
+    fails = [x for x in uniq if x[0] == "FAIL"]
+    warns = [x for x in uniq if x[0] == "WARN"]
+
+    def first_sentence(text, limit=420):
+        text = text.strip()
+        m = re.search(r"(?<=[a-z0-9`)])\. (?=[A-Z`])", text[:limit + 80])
+        cut = text[:m.start() + 1] if m and m.start() >= 40 else text[:limit]
+        cut = cut if cut.endswith((".", ":")) else cut.rstrip(" ,;") + ("..." if len(text) > len(cut) else ".")
+        return cut[:1].upper() + cut[1:]
+
+    out = ["## Conclusion", ""]
+    if fails:
+        r, n, d = fails[0]
+        out.append("**Root cause to look at first: %s**" % n)
+        out.append("")
+        out.append(first_sentence(d))
+        out.append("")
+        out.append("(%d failure(s) and %d warning(s) in total. The table \"Check results\" near the end lists them all, failures first; later failures are often consequences of the first.)" % (len(fails), len(warns)))
+    elif warns:
+        r, n, d = warns[0]
+        out.append("**No failure found. %d warning(s); look at: %s**" % (len(warns), n))
+        out.append("")
+        out.append(first_sentence(d))
+    elif uniq:
+        out.append("**All good: no failure and no warning in what was collected.**")
+    else:
+        out.append("**No verdict: no check could be run.**")
+    notes = []
+    if not_collected:
+        notes.append("%d part(s) were not collected (see \"Not collected\" near the end): this verdict covers only what was collected." % len(not_collected))
+    if errors and not fails:
+        notes.append("%d call(s) to the server failed (see \"Calls that failed\")." % len(errors))
+    if notes:
+        out += ["", " ".join(notes)]
+    out.append("")
+    return out
+
+
 def finish(c):
     out, errors = c.out, c.errors
     # summary
@@ -2749,10 +2790,10 @@ def finish(c):
         say("|---|---|---|")
         for w, why, how in NOT_COLLECTED:
             say("| %s | %s | %s |" % (w.replace("|", "\\|"), why.replace("|", "\\|"), how.replace("|", "\\|")))
-        REPORT[4:4] = ["**%d part(s) were not collected**; see the section \"Not collected\" near the end." % len(NOT_COLLECTED), ""]
     else:
         say("Nothing was skipped.")
     say("")
+    REPORT[4:4] = conclusion_lines(CHECKS, NOT_COLLECTED, errors)
     order = {"FAIL": 0, "WARN": 1, "INFO": 2, "PASS": 3}
     say("## Check results")
     say("")

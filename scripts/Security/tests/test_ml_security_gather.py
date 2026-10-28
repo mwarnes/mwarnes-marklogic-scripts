@@ -272,6 +272,41 @@ class GatherTests(unittest.TestCase):
         s = self.ldap_groups_summary(["cn=lab-users,dc=x,dc=org"], *win)
         self.assertIn("LDAP login passed, then the request was refused (403)", s)
 
+    def test_the_conclusion_names_the_first_failure_or_says_all_good(self):
+        good = {"iss": ISS, "aud": "client", "exp": int(time.time()) + 600, "preferred_username": "alice", "groups": ["ml-readers"]}
+        s = self.token_summary("tok-good", self.jwt(good))
+        self.assertIn("## Conclusion", s)
+        self.assertIn("**All good: no failure and no warning in what was collected.**", s)
+        self.assertLess(s.index("## Conclusion"), s.index("## Check results"))
+        s = self.token_summary("tok-bad", self.jwt(dict(good, iss="http://elsewhere/")))
+        self.assertIn("**Root cause to look at first: token iss = oauth-jwt-issuer-uri**", s)
+        self.assertNotIn("All good", s)
+        self.assertRegex(s, r"\(\d+ failure\(s\) and \d+ warning\(s\) in total")
+
+    def test_all_good_says_when_parts_were_not_collected(self):
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("## Conclusion", s)
+        if "All good" in s:
+            self.assertIn("this verdict covers only what was collected", s)
+
+    def test_conclusion_text_helpers(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        none = mod.conclusion_lines([], [], [])
+        self.assertIn("**No verdict: no check could be run.**", none)
+        warn = mod.conclusion_lines([("WARN", "something odd", "details of it. More text follows here.")], [("x", "y", "z")], [])
+        text = "\n".join(warn)
+        self.assertIn("**No failure found. 1 warning(s); look at: something odd**", text)
+        self.assertIn("1 part(s) were not collected", text)
+        fail = "\n".join(mod.conclusion_lines([("PASS", "a", ""), ("FAIL", "the thing", "the thing is broken in this and that way, and this sentence is long enough. Second sentence."), ("FAIL", "other", "x")], [], []))
+        self.assertIn("**Root cause to look at first: the thing**", fail)
+        self.assertIn("The thing is broken in this and that way, and this sentence is long enough.", fail)
+        self.assertNotIn("Second sentence", fail)
+        self.assertIn("2 failure(s) and 0 warning(s)", fail)
+
     def test_minimal_run_lists_what_was_not_collected(self):
         r, s, out = self.run_gather("oauth", "--external-security", "oa", "--no-probe")
         self.assertIn("## Not collected", s)
@@ -611,7 +646,8 @@ class SamlRuleTests(unittest.TestCase):
     def test_a_near_miss_names_the_closest_role_external_name(self):
         s = self.gather_logs("qconsole-user", ["qconsole-users"])
         self.assertRegex(s, r"\*\*FAIL\*\* \| Group values of alice map to a MarkLogic role")
-        self.assertIn("Closest role external name(s): `qconsole-users`", s)
+        self.assertIn("Closest role external name(s) among the", s)
+        self.assertIn("`qconsole-users`", s)
         self.assertIn("case does not matter", s)
 
     def test_an_unrelated_group_value_gets_no_closest_name(self):
