@@ -294,6 +294,33 @@ class GatherTests(unittest.TestCase):
         if "All good" in s:
             self.assertIn("this verdict covers only what was collected", s)
 
+    def test_conclusion_ranks_expiry_warnings_last_and_says_probable_cause_when_the_login_stalled(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ranked = "\n".join(mod.conclusion_lines([("WARN", "client certificate #1 expires soon", "29 days left"), ("WARN", "the real warning", "this is what to look at.")], [], []))
+        self.assertIn("look at: the real warning**", ranked)
+        only_expiry = "\n".join(mod.conclusion_lines([("WARN", "client certificate #1 expires soon", "29 days left")], [], []))
+        self.assertIn("look at: client certificate #1 expires soon**", only_expiry)
+        stalled = "\n".join(mod.conclusion_lines([("WARN", "browser was sent to the IdP but never came back", "no return."),
+                                                   ("WARN", "x: oauth-authorization-server-uri = discovery authorization_endpoint", "config a / discovery b")], [], []))
+        self.assertIn("**Probable cause: x: oauth-authorization-server-uri = discovery authorization_endpoint**", stalled)
+        self.assertIn("the login did not complete", stalled)
+        self.assertNotIn("No failure found", stalled)
+        only_stalled = "\n".join(mod.conclusion_lines([("WARN", "browser was sent to the IdP but never came back", "no return.")], [], []))
+        self.assertIn("**Probable cause: browser was sent to the IdP but never came back**", only_stalled)
+
+    def test_tls_policy_of_marklogic_11_has_no_tls_13_flag(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        base = {"ssl-disable-sslv3": True, "ssl-disable-tlsv1": True, "ssl-disable-tlsv1-1": True}
+        self.assertEqual(mod.tls_policy(dict(base, **{"ssl-disable-tlsv1-2": True}), 11)[0], "allowed: see ssl-disable-* flags")
+        self.assertEqual(mod.tls_policy(dict(base, **{"ssl-disable-tlsv1-2": False}), 11)[0], "allowed: TLSv1.2")
+        self.assertEqual(mod.tls_policy({"ssl-min-allow-tls": "TLSv1.3"}, 12)[0], "minimum TLSv1.3")
+
     def test_conclusion_text_helpers(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("gather", SCRIPT)
@@ -840,8 +867,9 @@ class CertHandler(BaseHTTPRequestHandler):
         if p == "/manage/v2/servers":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "cert-srv", "groupnameref": "Default"}, {"nameref": "other-srv", "groupnameref": "Default"}]}}})
         if p == "/manage/v2/servers/cert-srv/properties":
-            d = {"port": 9301, "authentication": "certificate", "internal-security": True, "ssl-certificate-template": "T",
-                 "ssl-require-client-certificate": True, "ssl-client-issuer-authority-verification": CSTATE.get("verification", False),
+            d = {"port": 9301, "authentication": "certificate", "internal-security": True, "ssl-certificate-template": CSTATE.get("tpl", "T"),
+                 "ssl-require-client-certificate": CSTATE.get("require", True), "ssl-client-issuer-authority-verification": CSTATE.get("verification", False),
+                 **({"ssl-min-allow-tls": CSTATE["min_tls"]} if CSTATE.get("min_tls") else {}), **CSTATE.get("tls_flags", {}),
                  "ssl-client-certificate-pem": [pems[k] for k in CSTATE.get("sel", ["root", "inter"])]}
             if CSTATE.get("ext_sec", True):
                 d["external-security"] = ["cert-prof"]
@@ -915,6 +943,7 @@ class CertificateAreaTests(unittest.TestCase):
         leaf("ldaporder", "/UID=jdoe/OU=people/DC=example/DC=com", "Test-Intermediate")
         leaf("ldapreversed", "/DC=com/DC=example/OU=people/UID=jdoe", "Test-Intermediate")
         leaf("ldapelsewhere", "/UID=jdoe/OU=people/O=Elsewhere", "Test-Intermediate")
+        leaf("extrardn", "/CN=user1.example.com/OU=TEST ONLY/O=Extra", "Test-Intermediate")
         cls.pems = {"root": Path(T, "Test-Root.pem").read_text(), "inter": Path(T, "Test-Intermediate.pem").read_text(), "other": Path(T, "Other-Root.pem").read_text()}
         CSTATE["pems"] = cls.pems
         Path(T, "chain.pem").write_text(cls.pems["inter"] + cls.pems["root"])
@@ -927,7 +956,7 @@ class CertificateAreaTests(unittest.TestCase):
         cls.srv.server_close()
 
     def setUp(self):
-        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr"):
+        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr", "tpl", "require", "min_tls", "tls_flags"):
             CSTATE.pop(k, None)
 
     def gather(self, cert=None, chain=False, extra=(), **state):
@@ -1067,6 +1096,45 @@ class CertificateAreaTests(unittest.TestCase):
         self.assertIn("NOT the internal-authorization `no user`", s)
         self.assertIn("Four causes write this same line", s)
         self.assertIn("wrong password (or DN) of the search account", s)
+
+    def test_an_extra_rdn_in_the_certificate_dn_is_named(self):
+        r, s = self.gather("extrardn", chain=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| client certificate DN is the external name of a MarkLogic user \| no user has the external name")
+        self.assertIn("the DN has the extra RDN(s) `O=Extra` that the external name `CN=user1.example.com,OU=TEST ONLY` (user u1) lacks", s)
+
+    def test_a_certificate_that_is_not_required_and_a_tls_13_only_server_are_reported(self):
+        r, s = self.gather("user1", chain=True, require=False, min_tls="TLSv1.3")
+        self.assertRegex(s, r"\*\*INFO\*\* \| cert-srv: a client certificate is not required")
+        self.assertRegex(s, r"\*\*WARN\*\* \| cert-srv: only TLS 1.3 is allowed")
+        self.assertIn("fails the handshake and nothing is written to the logs", s)
+        r, s = self.gather("user1", chain=True, require=True, min_tls="TLSv1.2")
+        self.assertNotIn("only TLS 1.3 is allowed", s)
+        self.assertNotIn("a client certificate is not required", s)
+
+    def test_on_marklogic_11_disabling_tls_12_leaves_no_usable_tls_version(self):
+        flags = {"ssl-disable-sslv3": True, "ssl-disable-tlsv1": True, "ssl-disable-tlsv1-1": True, "ssl-disable-tlsv1-2": True}
+        r, s = self.gather("user1", chain=True, tls_flags=flags)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: no TLS version is usable")
+        self.assertIn("MarkLogic 11.3.7 does not serve TLS 1.3", s)
+        r, s = self.gather("user1", chain=True, tls_flags=dict(flags, **{"ssl-disable-tlsv1-2": False}))
+        self.assertNotIn("no TLS version is usable", s)
+
+    def test_new_certificate_log_hints(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
+        r, s = self.gather("user1", chain=True, extra=win, errlog=(
+            "2026-10-25 10:00:08.000 Info: [Event:id=External Authenticate] ExternalSecurity[cert-prof] fail because external name\n"
+            "2026-10-25 10:00:09.000 Info: [Event:id=External Authenticate] ExternalSecurity[cert-prof] fail because no client certificate\n"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("compared case-sensitively, unlike role external names", s)
+        self.assertIn("the line appears when a certificate is optional", s)
+
+    def test_without_https_the_missing_certificate_template_is_the_failure_named(self):
+        r, s = self.gather(sel=[], tpl=None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: HTTPS enabled")
+        self.assertNotIn("a client certificate authority is selected", s)
+        self.assertIn("**Root cause to look at first: cert-srv: HTTPS enabled**", s)
 
     def test_a_certificate_login_that_passed_and_then_got_403_is_explained(self):
         win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]
