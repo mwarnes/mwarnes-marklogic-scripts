@@ -483,13 +483,23 @@ class SamlHandler(BaseHTTPRequestHandler):
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "sp"}]}}})
         if p == "/manage/v2/external-security/sp/properties":
             return self.reply({"external-security-name": "sp", "authentication": "saml", "authorization": SSTATE["authz"], "saml-server": {
-                "saml-entity-id": "https://idp.example.com/meta", "saml-destination": "https://idp.example.com/sso", "saml-issuer": "https://ml.example.com:8013"}})
+                "saml-entity-id": "https://idp.example.com/meta", "saml-destination": "https://idp.example.com/sso", "saml-issuer": SSTATE.get("issuer", "https://ml.example.com:8013"),
+                **({"saml-sp-certificate": SSTATE["sp_cert"], "saml-sp-private-key": "ENCRYPTEDKEYGARBAGE0123456789"} if SSTATE.get("sp_cert") else {})}})
         if p == "/manage/v2/servers":
-            return self.reply({"x": {"list-items": {"list-item": []}}})
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "api", "groupnameref": "Default"}] if SSTATE.get("server") else []}}})
+        if p == "/manage/v2/servers/api/properties" and SSTATE.get("server"):
+            return self.reply(dict({"port": 8013, "authentication": "saml", "ssl-certificate-template": "T", "external-security": ["sp"]}, **SSTATE["server"]))
         if p == "/manage/v2/roles":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "reader"}]}}})
         if p == "/manage/v2/roles/reader/properties":
-            return self.reply({"role-name": "reader", **({"external-name": ["qconsole-user"]} if SSTATE["role_external"] else {})})
+            return self.reply({"role-name": "reader", **({"external-name": SSTATE.get("role_names", ["qconsole-user"])} if SSTATE["role_external"] else {})})
+        if p == "/manage/v2/logs":
+            body = SSTATE.get("errlog", "") if "ErrorLog" in self.path else ""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(body.encode())
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -513,6 +523,101 @@ class SamlRuleTests(unittest.TestCase):
                             "--external-security", "sp", "--out", out], env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         return Path(out, "SUMMARY.md").read_text()
+
+    def gather_logs(self, group, role_names):
+        SSTATE.update(version="11.3.7", authz="saml", role_external=True, role_names=role_names, errlog=(
+            "2026-10-25 10:00:01.000 Info: [Event:id=SAML Response] Saml Response samlId:c123 Username:alice Group: %s Valid from:2026-10-25T09:59:00Z Valid until:2026-10-25T10:05:00Z\n" % group))
+        out = tempfile.mkdtemp(prefix="msg-saml.")
+        try:
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT), "saml", "--host", "127.0.0.1", "--port", str(SPORT), "--scheme", "http", "--user", "admin",
+                                "--external-security", "sp", "--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--out", out],
+                               env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        finally:
+            for k in ("role_names", "errlog"):
+                SSTATE.pop(k, None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return Path(out, "SUMMARY.md").read_text()
+
+    def gather_server(self, **state):
+        SSTATE.update(version="11.3.7", authz="saml", role_external=True)
+        SSTATE.update(state)
+        out = tempfile.mkdtemp(prefix="msg-saml.")
+        try:
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT), "saml", "--host", "127.0.0.1", "--port", str(SPORT), "--scheme", "http", "--user", "admin",
+                                "--external-security", "sp", "--out", out], env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        finally:
+            for k in ("server", "issuer", "sp_cert"):
+                SSTATE.pop(k, None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return Path(out, "SUMMARY.md").read_text()
+
+    def test_an_app_server_that_is_not_saml_but_has_a_saml_profile_is_warned_about(self):
+        s = self.gather_server(server={"authentication": "basic"})
+        self.assertRegex(s, r"\*\*WARN\*\* \| app server api uses saml authentication \| authentication is `basic`, not `saml`")
+        s = self.gather_server(server={"authentication": "saml"})
+        self.assertNotIn("uses saml authentication", s)
+
+    def test_a_redirect_in_the_trace_is_not_blamed_on_the_idp_for_a_non_saml_app_server(self):
+        SSTATE["errlog"] = ("2026-10-25 10:00:01.000 Info: [Event:id=SAML] Saml Redirect to IDP: https://idp.example.com/sso?SAMLRequest=abc\n")
+        try:
+            SSTATE.update(version="11.3.7", authz="saml", role_external=True, server={"authentication": "basic"})
+            out = tempfile.mkdtemp(prefix="msg-saml.")
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT), "saml", "--host", "127.0.0.1", "--port", str(SPORT), "--scheme", "http", "--user", "admin", "--external-security", "sp",
+                                "--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--out", out],
+                               env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        finally:
+            for k in ("errlog", "server"):
+                SSTATE.pop(k, None)
+        s = Path(out, "SUMMARY.md").read_text()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("uses saml authentication", s)
+        self.assertNotIn("browser was sent to the IdP but no SAML response came back", s)
+        self.assertIn("does not use saml authentication, so its clients get a password challenge", s)
+
+    def test_an_http_app_server_with_an_https_issuer_fails(self):
+        s = self.gather_server(server={"ssl-certificate-template": None}, issuer="https://ml.example.com:8013")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| app server api serves the https URL of profile sp")
+        s = self.gather_server(server={}, issuer="https://ml.example.com:8013")
+        self.assertNotIn("serves the https URL", s)
+
+    def test_an_issuer_port_that_is_not_the_app_server_port_is_a_lead(self):
+        s = self.gather_server(server={"port": 8057}, issuer="https://ml.example.com:9999")
+        self.assertRegex(s, r"\*\*WARN\*\* \| app server api: saml-issuer port matches the app server port")
+        s = self.gather_server(server={"port": 8013}, issuer="https://ml.example.com:8013")
+        self.assertNotIn("saml-issuer port matches", s)
+
+    def test_the_sp_key_pair_is_not_compared_and_no_key_text_leaks(self):
+        d = tempfile.mkdtemp(prefix="msg-spcert.")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", d + "/k.pem", "-out", d + "/c.pem", "-subj", "/CN=sp.example.com", "-days", "30"],
+                       capture_output=True, check=True)
+        s = self.gather_server(sp_cert=Path(d, "c.pem").read_text())
+        self.assertRegex(s, r"\*\*INFO\*\* \| sp: SP private key not compared with saml-sp-certificate")
+        self.assertRegex(s, r"SP certificate public key SHA-256: `[0-9a-f]{64}`")
+        self.assertNotIn("ENCRYPTEDKEYGARBAGE", s)
+        self.assertNotIn("PRIVATE KEY", s)
+
+    def test_a_response_with_no_group_values_is_named(self):
+        for grp in ("", "alice"):   # the trace's Group field holds the NameID attribute's value too
+            s = self.gather_logs(grp, ["qconsole-user"])
+            self.assertRegex(s, r"\*\*FAIL\*\* \| the assertion for alice carries no group values")
+            self.assertNotIn("Closest role external name", s)
+        self.assertIn("the attribute name does not matter", s)
+
+    def test_a_group_value_matches_a_role_external_name_ignoring_case(self):
+        s = self.gather_logs("QConsole-User", ["qconsole-user"])
+        self.assertRegex(s, r"\*\*PASS\*\* \| Group values of alice map to MarkLogic roles \| `QConsole-User` -> reader \(external name `qconsole-user`: matches ignoring case\)")
+        self.assertNotIn("| **FAIL** | Group values of alice", s)
+
+    def test_a_near_miss_names_the_closest_role_external_name(self):
+        s = self.gather_logs("qconsole-user", ["qconsole-users"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| Group values of alice map to a MarkLogic role")
+        self.assertIn("Closest role external name(s): `qconsole-users`", s)
+        self.assertIn("case does not matter", s)
+
+    def test_an_unrelated_group_value_gets_no_closest_name(self):
+        s = self.gather_logs("finance", ["qconsole-user"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| Group values of alice map to a MarkLogic role")
+        self.assertNotIn("Closest role external name", s)
 
     def test_authorization_internal_is_guidance_not_a_failure(self):
         for v in ("11.3.7", "12.1.0", "11.2.0"):

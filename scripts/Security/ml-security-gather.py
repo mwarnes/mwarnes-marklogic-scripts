@@ -52,6 +52,7 @@ PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----"
 PRIV_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
 NOW = dt.datetime.now(dt.timezone.utc)
 
+NONSAML_SERVERS = []   # bound app servers whose authentication is not saml (the trace still shows a redirect for them, but the client gets a password challenge)
 REPORT = []   # markdown lines
 NOT_COLLECTED = []   # (what, why, how to add it)
 CHECKS = []   # (result, name, detail)
@@ -690,7 +691,10 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
             check("PASS", "MarkLogic accepted the SAML response", "%d response(s) validated; no SAML error lines" % valid)
         redirects = sum(1 for _, _, b in all_msgs if b.startswith("[Event:id=SAML] Saml Redirect to IDP") or b.startswith("Saml Redirect to IDP"))
         got_response = any("Saml Response samlId:" in b for _, _, b in all_msgs)
-        if redirects and not got_response and not errs:
+        if redirects and not got_response and not errs and NONSAML_SERVERS:
+            say("(The trace shows %d redirect(s) to the IdP, but app server %s does not use saml authentication, so its clients get a password challenge instead: see the warning about its authentication.)" % (
+                redirects, ", ".join(NONSAML_SERVERS)))
+        elif redirects and not got_response and not errs:
             check("INFO", "browser was sent to the IdP but no SAML response came back",
                   "%d redirect(s) to the IdP and no assertion posted back to MarkLogic in this window: the login stopped at the IdP "
                   "(wrong or denied user, for example an application policy binding in the IdP; a blocked ACS URL), or it happened outside the window or "
@@ -713,14 +717,29 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
                     continue
                 seen_g.add((user, grp))
                 toks = grp.split()
-                hit = {t: role_map[t] for t in toks if t in role_map}
+                # MarkLogic matches a Group value to a role external name ignoring case (tested on 11.3.7)
+                lower = {}
+                for en, rl in role_map.items():
+                    lower.setdefault(en.lower(), (en, rl))
+                hit = {t: lower[t.lower()] for t in toks if t.lower() in lower}
                 if hit:
                     check("PASS", "Group values of %s map to MarkLogic roles" % user,
-                          "; ".join("`%s` -> %s" % (t, ", ".join(r)) for t, r in hit.items()))
+                          "; ".join("`%s` -> %s%s" % (t, ", ".join(r), "" if en == t else " (external name `%s`: matches ignoring case)" % en)
+                                    for t, (en, r) in hit.items()))
+                elif not [t for t in toks if t != user]:
+                    # the trace's Group field also holds the NameID attribute's value (the user name): no other value means the IdP sent no group values
+                    check("FAIL", "the assertion for %s carries no group values" % user,
+                          "the trace shows `Group:` with no value other than the user name: the IdP sent no group values, so there is nothing to match to a role external name and the SAML identity gets no roles (HTTP 403). "
+                          "Add the group attribute to the IdP's SAML response for this application (the attribute name does not matter; its values are matched to role external names)")
                 else:
+                    import difflib
+                    near = []
+                    for t in toks:
+                        near += [x for x in difflib.get_close_matches(t, list(role_map), n=2, cutoff=0.8) if x not in near]
                     check("FAIL", "Group values of %s map to a MarkLogic role" % user,
-                          "none of `%s` equals the external-name of any role, so the SAML identity gets no roles" % grp)
-            say("With authorization `saml` the assertion's Group values are matched to roles' external names (roles-external-names.json lists them).")
+                          "none of `%s` equals the external-name of any role (case does not matter), so the SAML identity gets no roles%s" % (
+                              grp, (". Closest role external name(s): %s: a difference of a character or two is the usual cause" % ", ".join("`%s`" % x for x in near)) if near else ""))
+            say("With authorization `saml` the assertion's group values are matched, ignoring case, to roles' external names (roles-external-names.json lists them). The name of the assertion attribute that carries them does not matter.")
             say("")
     if mapped_rows:
         say("### Roles the SAML identity actually received (AccessLog)")
@@ -2500,6 +2519,20 @@ def run_saml(c):
                     "the IdP signing certificate has to be set in the profile; --idp-metadata shows the one the IdP publishes")
         if cfg.get("saml-sp-certificate"):
             analyse_chain("`%s` saml-sp-certificate" % n, cfg["saml-sp-certificate"])
+            if cfg["saml-sp-private-key-set"]:
+                # the private key is stored encrypted by MarkLogic and is not readable through the Management API: the pair cannot be checked here.
+                # Give the engineer the fingerprint of the certificate's public key and the command that gives the same value for the key file.
+                try:
+                    pub = subprocess.run(["openssl", "x509", "-noout", "-pubkey"], input=cfg["saml-sp-certificate"], capture_output=True, text=True).stdout
+                    der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "der"], input=pub.encode(), capture_output=True).stdout
+                    fp = hashlib.sha256(der).hexdigest() if der else None
+                except OSError:
+                    fp = None
+                say("- SP certificate public key SHA-256: `%s`. To check that the private key you hold belongs to it: `openssl pkey -in <sp.key> -pubout -outform der | openssl dgst -sha256` must print the same value." % (fp or "(openssl could not read it)"))
+                say("")
+                check("INFO", "%s: SP private key not compared with saml-sp-certificate" % n,
+                      "MarkLogic stores the private key encrypted and does not return it in a usable form, so the script cannot tell whether the key and the certificate are a pair. A mismatch breaks nothing while the IdP "
+                      "does not verify the signature of the SAML request, but an IdP that does verify it rejects the request. Compare the public key fingerprint shown in this report with the key file")
     if not cfgs:
         say("No SAML external security object found (or it could not be read; see errors below).")
         say("")
@@ -2534,7 +2567,22 @@ def run_saml(c):
             nm, grp, first(sp, "port"), first(sp, "authentication"), first(sp, "internal-security"), ", ".join(used),
             first(sp, "ssl-certificate-template", default="none")))
         if first(sp, "authentication") != "application-level" and first(sp, "authentication") != "saml":
-            check("INFO", "app server %s authentication" % nm, "authentication is `%s`; SAML relies on external-security being bound" % first(sp, "authentication"))
+            NONSAML_SERVERS.append(nm)
+            check("WARN", "app server %s uses saml authentication" % nm,
+                  "authentication is `%s`, not `saml`, although a SAML profile is attached: a request gets a `%s` challenge for a password and is never redirected to the IdP, "
+                  "so no assertion is ever posted. Set the app server's authentication to saml" % (first(sp, "authentication"), first(sp, "authentication")))
+        for pn in used:
+            pc = cfgs.get(pn) or {}
+            urls = [str(pc.get(k) or "") for k in ("saml-issuer", "saml-assertion-host")]
+            if any(u.startswith("https://") for u in urls) and not first(sp, "ssl-certificate-template"):
+                check("FAIL", "app server %s serves the https URL of profile %s" % (nm, pn),
+                      "the profile's SP issuer `%s` is https but the app server has no certificate template, so it speaks plain HTTP: the IdP posts the assertion to an https URL this port does not answer, "
+                      "and the login stops at the IdP. Give the app server a certificate template, or change the profile to http" % pc.get("saml-issuer"))
+            m = re.match(r"https?://[^/:]+(?::(\d+))?", str(pc.get("saml-issuer") or ""))
+            if m and m.group(1) and first(sp, "port") and m.group(1) != str(first(sp, "port")):
+                check("WARN", "app server %s: saml-issuer port matches the app server port" % nm,
+                      "profile %s has saml-issuer `%s` (port %s) but the app server listens on port %s. The issuer is the SP entity id the IdP registered as the audience: if the IdP application was set up "
+                      "for the app server's own URL, the assertion's audience will not match and the login is refused (401)" % (pn, pc.get("saml-issuer"), m.group(1), first(sp, "port")))
     if not seen:
         say("None found (the object may not be bound to an app server, or the server list could not be read).")
         check("WARN", "SAML external security is bound to an app server", "no app server referenced a SAML object")
