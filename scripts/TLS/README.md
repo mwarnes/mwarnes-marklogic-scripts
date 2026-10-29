@@ -288,7 +288,7 @@ Server certificates are used for TLS/SSL encryption on web servers and have:
 ### Client Certificates  
 Client certificates are used for user authentication and have:
 - **Extended Key Usage**: `clientAuth` (TLS Web Client Authentication)  
-- **Subject Alternative Names**: Email addresses for user identification
+- **Subject Alternative Names**: optional (MarkLogic does not use them); the user is identified by the full subject DN, which must equal the user's external name
 - **Purpose**: Authenticate users to servers (e.g., MarkLogic certificate-based auth)
 
 ```bash

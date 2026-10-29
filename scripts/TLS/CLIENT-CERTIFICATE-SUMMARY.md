@@ -26,7 +26,7 @@ Your existing TLS certificate scripts **already support** generating proper clie
 The client certificates have the **exact** properties needed for MarkLogic authentication:
 
 - **Extended Key Usage**: `TLS Web Client Authentication` (**NOT** server auth)
-- **Subject Alternative Name**: Email address for user identification  
+- **Subject Alternative Name**: optional; MarkLogic identifies the user by the full subject DN (the user's external name), not by the e-mail address  
 - **No server capabilities**: Cannot be misused for server TLS encryption
 - **Proper CA chain**: Can be validated against your CA
 

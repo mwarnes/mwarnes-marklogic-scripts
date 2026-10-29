@@ -126,11 +126,11 @@ LOGIN_RESPONSE=$(curl -i -s $CURL_OPTS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L \
 echo "$LOGIN_RESPONSE" > $WORKDIR/step3-response.txt
 
 # Check if login was successful and we get SAML response
-if echo "$LOGIN_RESPONSE" | grep -q "SAMLResponse\|Location.*oauth.warnesnet.com"; then
+if echo "$LOGIN_RESPONSE" | grep -q "SAMLResponse\|Location.*ml.example.com"; then
     log_success "Authentication successful"
 
     # Check if we're redirected back to MarkLogic
-    if echo "$LOGIN_RESPONSE" | grep -q "Location.*oauth.warnesnet.com"; then
+    if echo "$LOGIN_RESPONSE" | grep -q "Location.*ml.example.com"; then
         CALLBACK_URL=$(echo "$LOGIN_RESPONSE" | grep "Location:" | tail -1 | sed 's/Location: //' | tr -d '\r')
         log_info "SAML callback URL: $CALLBACK_URL"
     else

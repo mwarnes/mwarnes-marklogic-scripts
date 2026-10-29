@@ -27,7 +27,7 @@ DRY_RUN=false
 # ================================================================
 
 # Default values
-MARKLOGIC_HOST="${MARKLOGIC_HOST:-oauth.warnesnet.com}"
+MARKLOGIC_HOST="${MARKLOGIC_HOST:-localhost}"
 MARKLOGIC_PORT="${MARKLOGIC_PORT:-8002}"
 MARKLOGIC_USER="${MARKLOGIC_USER:-admin}"
 MARKLOGIC_PASS="${MARKLOGIC_PASS:-}"
@@ -80,7 +80,7 @@ Read-only verification of MarkLogic authentication configurations using the Mana
 OPTIONS:
     --config-name NAME            Name of configuration to verify
     --config-type TYPE            Type: oauth2, saml, ldap, kerberos, tls (certificate template), appserver, list
-    --marklogic-host HOST         MarkLogic host (default: oauth.warnesnet.com)
+    --marklogic-host HOST         MarkLogic host (default: localhost)
     --marklogic-port PORT         MarkLogic port (default: 8002)
     --marklogic-user USER         MarkLogic user (default: admin)
     --marklogic-pass PASS         Rejected; use MARKLOGIC_PASS or a hidden prompt
