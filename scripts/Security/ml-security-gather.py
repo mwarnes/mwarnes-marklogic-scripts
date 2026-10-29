@@ -1350,7 +1350,7 @@ CERT_HINTS = [
     (r"not found in ldapUserCache", "The DN in this line is the exact string MarkLogic searches for in the directory (stored order of the certificate). Compare it with the entry's DN."),
     (r"XDMP-LDAP-INVALID-CRED", "The directory refused the bind (error 49): wrong password (or DN) of the search account `ldap-default-user` of the profile. The client certificate is not the problem."),
     (r"certificateAuthenticate\(\) fail because no user", "TLS accepted the certificate, but no MarkLogic user has an external name equal to the full subject DN shown in `dn=`. MarkLogic compares the whole DN as it logs it (CN first, comma, no space); a user whose external name is only the CN does not match. Give a user that exact DN as external name (the certificate section of this report lists near-misses)."),
-    (r"no external security is configured", "The app server has no external security profile: create a profile with authentication `certificate` (authorization `internal`) and select it on the app server."),
+    (r"no external security is configured", "The app server has no external security profile. Without one, MarkLogic only logs in a certificate whose CN equals the name of a MarkLogic user; for any other certificate this line is written. Name a user after the CN, or create a profile with authentication `certificate` (authorization `internal`), select it on the app server and give the user the full subject DN as external name."),
     (r"Duplicate certificate subject", "Two certificates in the Security database share a subject; see the table of duplicate subjects in this report. It appeared after client certificate authorities were selected in the lab tests; usually harmless."),
     (r"certificateAuthenticate", "The certificate login failed after the TLS handshake; the message and the dn it shows say which certificate was presented."),
 ]
@@ -2407,6 +2407,29 @@ def check_client_cert(c, a, servers, profs=None):
             continue
         check_issuer_selection(c, nm, leaf, pool + sel, sel, str(first(sp, "ssl-client-issuer-authority-verification")).lower() == "true")
     profs = profs or {}
+    noprof = [nm for nm, grp, sp in servers if not profs.get(nm)]
+    if noprof:
+        cn = dn_cn(dn)
+        say("### Mapping the certificate to a MarkLogic user (app server without an external security profile: %s)" % ", ".join("`%s`" % x for x in noprof))
+        say("")
+        say("Without a profile MarkLogic looks for a user whose name equals the CN of the subject (`%s`); external names are not used." % cn)
+        data, err = c.api.get("/manage/v2/users?format=json")
+        names = list_names(data) if not err else None
+        if names is None:
+            c.errors.append("/manage/v2/users: " + str(err))
+        elif cn and cn in names:
+            up = c.fetch("/manage/v2/users/%s/properties?format=json" % q(cn), "user-%s.json" % slug(cn))
+            roles = [str(x) for x in find_all(up or {}, "role")]
+            check("PASS", "client certificate CN is the name of a MarkLogic user", "`%s` (roles: %s); app server(s) without a profile: %s" % (cn, ", ".join(sorted(set(roles))) or "none", ", ".join(noprof)))
+            if not roles:
+                check("WARN", "the mapped user has roles", "user `%s` has no roles: the login succeeds and the request is then refused (403)" % cn)
+        else:
+            check("FAIL", "client certificate CN is the name of a MarkLogic user",
+                  "no user is named `%s`: with no external security profile on %s TLS accepts the certificate and the login fails (`externalAuthenticate failed because no external security is configured`, HTTP 401). "
+                  "Create a user with that name, or create an external security profile with authentication `certificate` and select it" % (cn, ", ".join(noprof)))
+        say("")
+        if len(noprof) == len(servers):
+            return
     internal_ldap = [pn for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "internal" and first(pp, "ldap-server-uri")]
     ldap_note = (" The profile %s has LDAP server settings but authorization `internal`: the directory is not consulted, so the DN must be the external name of a MarkLogic user; set authorization to ldap to use the LDAP groups." % ", ".join("`%s`" % x for x in internal_ldap)) if internal_ldap else ""
     ldap_profiles = {pn: pp for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "ldap"}
@@ -2514,8 +2537,10 @@ def run_certificate(c):
         if str(first(sp, "internal-security")).lower() == "false":
             check("WARN", "%s: internal-security" % nm, "false: certificate authentication maps the subject DN to a user of the Security database; the working configurations tested have internal security on")
         if not used:
-            check("FAIL", "%s: an external security profile is set" % nm,
-                  "none: the ErrorLog says `externalAuthenticate failed because no external security is configured`. Create an external security profile with authentication `certificate` (authorization `internal`) and select it on the app server")
+            check("WARN", "%s: an external security profile is set" % nm,
+                  "none. Without a profile MarkLogic looks for a MarkLogic user whose NAME is the CN of the certificate subject (tested on 11.3.7 and 12.1.0; the external name route needs a profile): a user named like the CN logs in, "
+                  "any other certificate fails with `externalAuthenticate failed because no external security is configured`. To map the full subject DN to a user's external name, create an external security profile with authentication `certificate` "
+                  "(authorization `internal`) and select it on the app server")
         for pn in used:
             pp = c.fetch("/manage/v2/external-security/%s/properties?format=json" % q(pn), "external-security-%s.json" % slug(pn))
             if pp:

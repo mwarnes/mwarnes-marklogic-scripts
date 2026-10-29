@@ -159,7 +159,7 @@ testing: results are cached per profile, so a change at the IdP or the directory
 
 MarkLogic maps the **full subject DN** of the client certificate to a MarkLogic user's external name; the DN is compared as MarkLogic logs it, in the order stored
 in the certificate (a certificate stored CN, OU is `CN=...,OU=...`; openssl's RFC 2253 output shows it reversed, the report prints both; checked only for certificates
-stored CN first). A user whose external name is only the CN does not match. `--client-cert` takes a **public** certificate; a file that contains a private key is refused.
+stored CN first). A user whose external name is only the CN does not match. This needs an external security profile (authentication `certificate`) on the app server: **without a profile** MarkLogic instead looks for a user whose **name** is the CN of the subject (tested on 11.3.7 and 12.1.0), external names are not used, and the report says so (WARN, and a check that a user named like the CN exists). `--client-cert` takes a **public** certificate; a file that contains a private key is refused.
 
 What the report can and cannot explain: a certificate rejected in the TLS handshake (no certificate, expired, not yet valid, serverAuth-only usage, issuing CA not
 selected) leaves **nothing** in the ErrorLog or AccessLog, so the cause comes from the app server settings and the certificate itself:
