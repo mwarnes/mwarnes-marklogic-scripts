@@ -46,7 +46,7 @@ source "$SCRIPT_DIR/marklogic-utils.sh"
 # ================================================================
 
 # Default values
-MARKLOGIC_HOST="${MARKLOGIC_HOST:-oauth.warnesnet.com}"
+MARKLOGIC_HOST="${MARKLOGIC_HOST:-localhost}"
 MARKLOGIC_PORT="${MARKLOGIC_PORT:-8002}"
 MARKLOGIC_USER="${MARKLOGIC_USER:-admin}"
 MARKLOGIC_PASS="${MARKLOGIC_PASS:-}"
@@ -106,7 +106,7 @@ OPTIONS:
     --show-current                Show current app server security configuration (read-only)
     --remove-security             Remove external security (set authentication to basic)
     --list-appservers             List all available app servers (read-only)
-    --marklogic-host HOST         MarkLogic host (default: oauth.warnesnet.com)
+    --marklogic-host HOST         MarkLogic host (default: localhost)
     --marklogic-port PORT         MarkLogic manage port (default: 8002)
     --marklogic-user USER         MarkLogic admin user (default: admin)
     --marklogic-pass PASS         Rejected; use MARKLOGIC_PASS or a hidden prompt

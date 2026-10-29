@@ -36,9 +36,9 @@
 #   show-idp-info             Show IdP configuration details
 #
 # Examples:
-#   # Create SAML external security with Keycloak (Warnesnet)
+#   # Create SAML external security with Keycloak
 #   ./configure-marklogic-saml.sh create-external-security --name keycloak-saml \\
-#       --idp-metadata-url "https://oauth.warnesnet.com:8443/realms/master/protocol/saml/descriptor"
+#       --idp-metadata-url "https://idp.example.com:8443/realms/master/protocol/saml/descriptor"
 #
 #   # Create SAML external security with Azure AD
 #   ./configure-marklogic-saml.sh create-external-security --name azure-saml \\
@@ -46,11 +46,11 @@
 #
 #   # Create with Okta
 #   ./configure-marklogic-saml.sh create-external-security --name okta-saml \\
-#       --idp-metadata-file okta-metadata.xml --sp-entity-id "oauth.warnesnet.com"
+#       --idp-metadata-file okta-metadata.xml --sp-entity-id "https://ml.example.com:8000"
 #
 #   # Configure app server for SAML
 #   ./configure-marklogic-saml.sh configure-appserver --appserver App-Services \\
-#       --external-security keycloak-saml --saml-acs-url "https://oauth.warnesnet.com/saml/acs"
+#       --external-security keycloak-saml --saml-acs-url "https://ml.example.com:8000/"
 #
 #   # Generate SP metadata for IdP configuration
 #   ./configure-marklogic-saml.sh generate-sp-metadata --external-security keycloak-saml
@@ -83,7 +83,7 @@ ENCRYPTION_CERTIFICATE_FILE=""
 APPSERVER_NAME=""
 ASSERTION_FILE=""
 FORCE="false"
-SAML_BINDING="HTTP-POST"
+SAML_BINDING="HTTP-Redirect"
 CLOCK_SKEW="300"
 DRY_RUN="false"
 VERBOSE="false"
@@ -140,7 +140,7 @@ saml_apply_idp_metadata_to_json() {
     fi
 
     local binding_urn="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
-    if [ "${SAML_BINDING:-HTTP-POST}" = "HTTP-Redirect" ]; then
+    if [ "${SAML_BINDING:-HTTP-Redirect}" = "HTTP-Redirect" ]; then
         binding_urn="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
     fi
 
@@ -157,7 +157,7 @@ saml_apply_idp_metadata_to_json() {
     fi
 
     local idp_cert
-    idp_cert=$(xmllint --nonet --xpath "string(//*[local-name()='X509Certificate'])" "$metadata_file" 2>/dev/null)
+    idp_cert=$(xmllint --nonet --xpath "string((//*[local-name()='KeyDescriptor'][not(@use='encryption')]//*[local-name()='X509Certificate'])[1])" "$metadata_file" 2>/dev/null)
     [ -n "$idp_cert" ] || { ml_log_error "IdP metadata has no signing certificate"; return 1; }
     if [ -n "$idp_cert" ]; then
         local formatted_cert
@@ -554,7 +554,7 @@ saml_configure_appserver() {
 saml_show_next_steps() {
     echo
     ml_log_info "Next steps:"
-    ml_log_info "1. Generate SP metadata: $0 generate-sp-metadata --external-security $EXTERNAL_SECURITY_NAME --sp-acs-url https://<public-app-server>/saml/acs"
+    ml_log_info "1. Generate SP metadata: $0 generate-sp-metadata --external-security $EXTERNAL_SECURITY_NAME --sp-acs-url https://<host>:<port>/ (trailing slash; the SP entity id has none)"
     ml_log_info "2. Configure IdP with SP metadata"
     ml_log_info "3. Configure app server: $0 configure-appserver --appserver <NAME> --external-security $EXTERNAL_SECURITY_NAME"
     ml_log_info "4. Test SAML flow: $0 test-saml --external-security $EXTERNAL_SECURITY_NAME"
@@ -1068,7 +1068,12 @@ COMMANDS:
 
 CREATE-EXTERNAL-SECURITY OPTIONS:
     --name NAME                   External security name (required)
-    --sp-entity-id ID             SP Entity ID (default: MarkLogic-SP; used in SAML issuer)
+    --sp-entity-id ID             SP Entity ID, used as saml-issuer (default: MarkLogic-SP). Use the app server's
+                                  address WITHOUT a path or trailing slash, e.g. https://ml.example.com:8000;
+                                  MarkLogic rejects an assertion whose audience differs from it. The ACS URL
+                                  registered at the IdP is the same address WITH a trailing slash.
+                                  Roles come only from assertion values that match role external names
+                                  (case-insensitive, any attribute name); no MarkLogic user is used
     --sp-acs-url URL              Public ACS URL; required only for SP metadata generation
     --idp-metadata-url URL        Identity Provider metadata URL
     --idp-metadata-file FILE      Identity Provider metadata file
@@ -1077,7 +1082,7 @@ CREATE-EXTERNAL-SECURITY OPTIONS:
     --name-id-format FORMAT       NameID format written into generated SP metadata only (default: email).
                                   MarkLogic itself always sends NameIDPolicy "unspecified" in AuthnRequests
     --saml-binding BINDING        Which IdP SSO endpoint to read from the IdP metadata: HTTP-POST or
-                                  HTTP-Redirect (default: HTTP-POST). MarkLogic 12.1 sends AuthnRequests
+                                  HTTP-Redirect (default: HTTP-Redirect, the endpoint the tested how-to uses). MarkLogic 12.1 sends AuthnRequests
                                   by redirect and receives the response by POST regardless
     --clock-skew SECONDS          Accepted but NOT applied: MarkLogic 12.1 has no clock-skew property
                                   for external security (keep IdP and MarkLogic clocks in sync)
@@ -1115,19 +1120,19 @@ Rollback and recovery:
     IdP-side changes and metadata publication must be reversed at the provider.
 
 EXAMPLES:
-    # Create SAML external security with Keycloak (Warnesnet)
+    # Create SAML external security with Keycloak
     $0 create-external-security --name keycloak-saml \\
-        --sp-entity-id "https://oauth.warnesnet.com" \\
-        --idp-metadata-url "https://oauth.warnesnet.com:8443/realms/master/protocol/saml/descriptor"
+        --sp-entity-id "https://ml.example.com:8000" \\
+        --idp-metadata-url "https://idp.example.com:8443/realms/master/protocol/saml/descriptor"
 
     # Create SAML external security for Azure AD
     $0 create-external-security --name azure-saml \\
-        --sp-entity-id "https://oauth.warnesnet.com" \\
+        --sp-entity-id "https://ml.example.com:8000" \\
         --idp-metadata-url "https://login.microsoftonline.com/tenant-id/federationmetadata/2007-06/federationmetadata.xml"
 
     # Create for Okta with local metadata file
     $0 create-external-security --name okta-saml \\
-        --sp-entity-id "oauth.warnesnet.com" \\
+        --sp-entity-id "https://ml.example.com:8000" \\
         --idp-metadata-file "okta-metadata.xml" \\
         --sp-certificate-file "sp-cert.pem" \\
         --sp-private-key-file "sp-key.pem"
@@ -1138,7 +1143,7 @@ EXAMPLES:
 
     # Generate SP metadata; ACS URL is specific to the public app-server deployment
     $0 generate-sp-metadata --external-security azure-saml \\
-        --sp-acs-url "https://oauth.warnesnet.com:8000/saml/acs"
+        --sp-acs-url "https://ml.example.com:8000/"
 
     # Test SAML authentication flow
     $0 test-saml --external-security azure-saml

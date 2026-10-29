@@ -58,12 +58,12 @@
 #
 #   # Create service principal and keytab
 #   ./configure-marklogic-kerberos.sh create-spn --service HTTP \\
-#       --hostname oauth.warnesnet.com --realm EXAMPLE.COM
+#       --hostname ml.example.com --realm EXAMPLE.COM
 #
 #   # Test Kerberos authentication
 #   KERBEROS_TEST_PASSWORD is read from the environment, or kinit prompts without echo
 #   ./configure-marklogic-kerberos.sh test-ticket --principal user@EXAMPLE.COM \\
-#       --service HTTP/oauth.warnesnet.com@EXAMPLE.COM
+#       --service HTTP/ml.example.com@EXAMPLE.COM
 #
 # ================================================================
 

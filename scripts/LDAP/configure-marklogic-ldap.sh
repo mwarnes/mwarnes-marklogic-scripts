@@ -1019,7 +1019,9 @@ CREATE-EXTERNAL-SECURITY OPTIONS:
     --bind-username USER          Bind username/DN (required)
     --bind-password PASS          Rejected; use LDAP_BIND_PASSWORD or a hidden prompt
     --ldap-attribute ATTR         User attribute (default: uid)
-    --authorization MODE          internal (default: map to MarkLogic users via external-name) or ldap (roles from groups)
+    --authorization MODE          internal (default: a MarkLogic user whose external name is the user's full DN)
+                                  or ldap (no MarkLogic user; a role whose external name is the group DN, as in
+                                  the memberOf values; external names are cluster-wide)
     --memberof-attribute ATTR     User attribute listing groups (MarkLogic default: memberOf)
     --member-attribute ATTR       Group attribute listing members (MarkLogic default: member)
     --nested-lookup               Also resolve groups of groups

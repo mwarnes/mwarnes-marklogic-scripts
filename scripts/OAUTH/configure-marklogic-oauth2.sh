@@ -23,16 +23,16 @@
 #
 # Examples:
 #   # Configure with MLEAProxy (development/testing)
-#   ./configure-marklogic-oauth2.sh --well-known-url http://localhost:8080/oauth/.well-known/config --marklogic-host oauth.warnesnet.com --config-name MLEAProxy-OAuth
+#   ./configure-marklogic-oauth2.sh --well-known-url http://localhost:8080/oauth/.well-known/config --marklogic-host ml.example.com --config-name MLEAProxy-OAuth
 #
 #   # Configure with MLEAProxy and fetch JWKS keys
-#   ./configure-marklogic-oauth2.sh --well-known-url http://localhost:8080/oauth/.well-known/config --marklogic-host oauth.warnesnet.com --config-name MLEAProxy-OAuth --fetch-jwks-keys
+#   ./configure-marklogic-oauth2.sh --well-known-url http://localhost:8080/oauth/.well-known/config --marklogic-host ml.example.com --config-name MLEAProxy-OAuth --fetch-jwks-keys
 #
 #   # Configure with Keycloak
-#   ./configure-marklogic-oauth2.sh --well-known-url https://keycloak.example.com/auth/realms/marklogic/.well-known/openid_configuration --marklogic-host oauth.warnesnet.com --config-name Keycloak-OAuth
+#   ./configure-marklogic-oauth2.sh --well-known-url https://keycloak.example.com/auth/realms/marklogic/.well-known/openid_configuration --marklogic-host ml.example.com --config-name Keycloak-OAuth
 #
 #   # Configure with Azure AD
-#   ./configure-marklogic-oauth2.sh --well-known-url https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid_configuration --marklogic-host oauth.warnesnet.com --config-name AzureAD-OAuth
+#   ./configure-marklogic-oauth2.sh --well-known-url https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid_configuration --marklogic-host ml.example.com --config-name AzureAD-OAuth
 #
 # ================================================================
 
@@ -163,7 +163,8 @@ OPTIONS:
     --role-attribute ATTR         JWT claim for roles (default: marklogic-roles)
     --privilege-attribute ATTR    JWT claim for privileges (optional)
     --cache-timeout SECONDS       Token cache timeout (default: 300)
-    --client-id ID                OAuth client ID (default: marklogic)
+    --client-id ID                OAuth client ID (default: marklogic). MarkLogic checks it against the
+                                  token's aud/azp claim: it must be the IdP client the tokens are issued for
     --fetch-jwks-keys             Fetch and validate provider JWKS before changes (default: disabled)
     --remove                      Remove/delete the external security configuration
     --force                       Confirm and update an existing configuration after backup
@@ -181,7 +182,8 @@ AUTHORIZATION CODE FLOW (MarkLogic 12.1+, requires app server SSL):
     --authorization-server-uri URL  Authorization endpoint (required for authorization-code;
                                    auto-filled from --well-known-url discovery when omitted)
     --token-server-uri URL        Token endpoint override (auto-filled from discovery when omitted)
-    --jwt-issuer-uri URL          Token issuer URI override (auto-filled from discovery when omitted)
+    --jwt-issuer-uri URL          Token issuer URI override (auto-filled from discovery when omitted); must equal
+                                  the token's iss exactly, trailing slash included
                                    NOTE: despite the Admin Interface tooltip, this is required for
                                    most IdPs when using RS256/JWKS validation, not just Entra/Cognito
     --oauth-scope SCOPES          Space-separated scopes to request (default: "openid profile")
@@ -878,14 +880,14 @@ main() {
     log_info "1. Configure app servers to use external security: $CONFIG_NAME"
     echo
     log_info "   To configure app servers, run:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "oauth.warnesnet.com" ]; then
+    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
         log_info "   ./scripts/configure-appserver-security.sh --appserver <SERVER_NAME> --external-security $CONFIG_NAME --marklogic-host $display_host_url"
     else
         log_info "   ./scripts/configure-appserver-security.sh --appserver <SERVER_NAME> --external-security $CONFIG_NAME"
     fi
     echo
     log_info "   Examples:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "oauth.warnesnet.com" ]; then
+    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
         log_info "   ./scripts/configure-appserver-security.sh --appserver App-Services --external-security $CONFIG_NAME --marklogic-host $display_host_url"
         log_info "   ./scripts/configure-appserver-security.sh --appserver Manage --external-security $CONFIG_NAME --marklogic-host $display_host_url --dry-run"
     else
@@ -894,7 +896,7 @@ main() {
     fi
     echo
     log_info "2. Test the OAuth2 configuration:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "oauth.warnesnet.com" ]; then
+    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
         log_info "   ./scripts/validate-oauth2-config.sh --well-known-url $WELL_KNOWN_URL --config-name $CONFIG_NAME --marklogic-host $display_host_url"
     else
         log_info "   ./scripts/validate-oauth2-config.sh --well-known-url $WELL_KNOWN_URL --config-name $CONFIG_NAME"
