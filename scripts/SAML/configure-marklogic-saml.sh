@@ -1373,7 +1373,7 @@ main() {
             echo
             case "$COMMAND" in
             create-external-security)
-                ml_show_footer "1. Generate SP metadata: $0 generate-sp-metadata --external-security $EXTERNAL_SECURITY_NAME
+                ml_show_footer "1. Generate SP metadata: $0 generate-sp-metadata --external-security $EXTERNAL_SECURITY_NAME --sp-acs-url https://<host>:<port>/
 2. Configure your IdP with the SP metadata
 3. Configure app server: $0 configure-appserver --appserver <NAME> --external-security $EXTERNAL_SECURITY_NAME
 4. Test SAML flow: $0 test-saml --external-security $EXTERNAL_SECURITY_NAME"

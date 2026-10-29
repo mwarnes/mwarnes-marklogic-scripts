@@ -187,6 +187,7 @@ AUTHORIZATION CODE FLOW (MarkLogic 12.1+, requires app server SSL):
                                    NOTE: despite the Admin Interface tooltip, this is required for
                                    most IdPs when using RS256/JWKS validation, not just Entra/Cognito
     --oauth-scope SCOPES          Space-separated scopes to request (default: "openid profile")
+                                  Include the scope that adds the roles claim, or the user gets no roles (403)
     --client-auth-method METHOD   Client authentication method (default: "Client secret")
 
 EXAMPLES:
@@ -877,30 +878,18 @@ main() {
     
     echo
     log_info "Next steps:"
+    local next_host_url="${display_host_url%:[0-9]*}"  # the app-server and validate scripts take the host without the manage port
     log_info "1. Configure app servers to use external security: $CONFIG_NAME"
     echo
     log_info "   To configure app servers, run:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
-        log_info "   ./scripts/configure-appserver-security.sh --appserver <SERVER_NAME> --external-security $CONFIG_NAME --marklogic-host $display_host_url"
-    else
-        log_info "   ./scripts/configure-appserver-security.sh --appserver <SERVER_NAME> --external-security $CONFIG_NAME"
-    fi
+    log_info "   ./scripts/configure-appserver-security.sh --appserver <SERVER_NAME> --external-security $CONFIG_NAME --authentication-method oauth --marklogic-host $next_host_url"
     echo
     log_info "   Examples:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
-        log_info "   ./scripts/configure-appserver-security.sh --appserver App-Services --external-security $CONFIG_NAME --marklogic-host $display_host_url"
-        log_info "   ./scripts/configure-appserver-security.sh --appserver Manage --external-security $CONFIG_NAME --marklogic-host $display_host_url --dry-run"
-    else
-        log_info "   ./scripts/configure-appserver-security.sh --appserver App-Services --external-security $CONFIG_NAME"
-        log_info "   ./scripts/configure-appserver-security.sh --appserver Manage --external-security $CONFIG_NAME --dry-run"
-    fi
+    log_info "   ./scripts/configure-appserver-security.sh --appserver App-Services --external-security $CONFIG_NAME --authentication-method oauth --marklogic-host $next_host_url"
+    log_info "   ./scripts/configure-appserver-security.sh --appserver Manage --external-security $CONFIG_NAME --authentication-method oauth --marklogic-host $next_host_url --dry-run"
     echo
     log_info "2. Test the OAuth2 configuration:"
-    if [ "$MARKLOGIC_HOST_ONLY" != "ml.example.com" ]; then
-        log_info "   ./scripts/validate-oauth2-config.sh --well-known-url $WELL_KNOWN_URL --config-name $CONFIG_NAME --marklogic-host $display_host_url"
-    else
-        log_info "   ./scripts/validate-oauth2-config.sh --well-known-url $WELL_KNOWN_URL --config-name $CONFIG_NAME"
-    fi
+    log_info "   ./scripts/validate-oauth2-config.sh --well-known-url $WELL_KNOWN_URL --config-name $CONFIG_NAME --marklogic-host $next_host_url"
     echo
     log_info "3. Verify role mapping and user permissions"
 
