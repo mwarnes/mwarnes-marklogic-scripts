@@ -968,7 +968,9 @@ class CertHandler(BaseHTTPRequestHandler):
             self.wfile.write(body.encode())
             return
         if p == "/manage/v2/users":
-            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "u1"}, {"nameref": "u2"}]}}})
+            return self.reply({"x": {"list-items": {"list-item": [{"nameref": "u1"}, {"nameref": "u2"}] + ([{"nameref": CSTATE["cn_user"]}] if CSTATE.get("cn_user") else [])}}})
+        if CSTATE.get("cn_user") and p == "/manage/v2/users/%s/properties" % CSTATE["cn_user"]:
+            return self.reply({"user-name": CSTATE["cn_user"], "role": ["reader"], "external-name": []})
         if p == "/manage/v2/users/u1/properties":
             return self.reply({"user-name": "u1", "role": ["reader"], "external-name": ["CN=user1.example.com,OU=TEST ONLY"]})
         if p == "/manage/v2/users/u2/properties":
@@ -1026,7 +1028,7 @@ class CertificateAreaTests(unittest.TestCase):
         cls.srv.server_close()
 
     def setUp(self):
-        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr", "tpl", "require", "min_tls", "tls_flags", "ldap_uri", "ldap_settings"):
+        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr", "tpl", "require", "min_tls", "tls_flags", "ldap_uri", "ldap_settings", "cn_user"):
             CSTATE.pop(k, None)
 
     def gather(self, cert=None, chain=False, extra=(), probe=False, **state):
@@ -1090,8 +1092,17 @@ class CertificateAreaTests(unittest.TestCase):
     def test_no_selected_ca_and_no_external_security_are_failures(self):
         r, s = self.gather(sel=[], ext_sec=False)
         self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: a client certificate authority is selected")
-        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-srv: an external security profile is set")
+        self.assertRegex(s, r"\*\*WARN\*\* \| cert-srv: an external security profile is set")
         self.assertIn("externalAuthenticate failed because no external security is configured", s)
+
+    def test_without_a_profile_the_user_is_found_by_the_cn(self):
+        r, s = self.gather("user1", ext_sec=False)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| client certificate CN is the name of a MarkLogic user")
+        self.assertIn("no user is named `user1.example.com`", s)
+        self.assertNotIn("is the external name of a MarkLogic user", s)
+        r, s = self.gather("user1", ext_sec=False, cn_user="user1.example.com")
+        self.assertRegex(s, r"\*\*PASS\*\* \| client certificate CN is the name of a MarkLogic user")
+        self.assertIn("`user1.example.com` (roles: reader)", s)
 
     def test_a_private_key_is_refused(self):
         key = Path(self.tmp, "user1.key")
