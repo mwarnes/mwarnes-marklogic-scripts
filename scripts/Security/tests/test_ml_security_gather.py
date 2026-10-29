@@ -58,11 +58,11 @@ class Handler(BaseHTTPRequestHandler):
                 "oauth-username-attribute": "preferred_username", "oauth-role-attribute": "groups", "oauth-client-secret": "SECRETVALUE"}})
         if p == "/manage/v2/external-security/ld/properties":
             return self.reply({"external-security-name": "ld", "authentication": "ldap", "authorization": STATE.get("ldap_authz", "internal"), "ldap-server": {
-                "ldap-server-uri": "ldap://127.0.0.1:9", "ldap-base": "dc=x,dc=com", "ldap-attribute": "uid", "ldap-password": "SECRETVALUE"}})
+                "ldap-server-uri": STATE.get("ldap_uri", "ldap://127.0.0.1:9"), "ldap-base": "dc=x,dc=com", "ldap-attribute": "uid", "ldap-default-user": "uid=search,dc=x,dc=com", "ldap-password": "SECRETVALUE"}})
         if p == "/manage/v2/servers":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "api", "groupnameref": "Default"}]}}})
         if p == "/manage/v2/servers/api/properties":
-            return self.reply({"port": 9100, "authentication": STATE.get("api_auth", "oauth"), "external-security": ["oa", "ld"],
+            return self.reply({"port": 9100, "authentication": STATE.get("api_auth", "oauth"), "external-security": STATE.get("api_ext", ["oa", "ld"]),
                                **({"ssl-certificate-template": "T"} if STATE.get("api_tpl") else {})})
         if p == "/manage/v2/roles":
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "reader"}]}}})
@@ -98,7 +98,7 @@ class GatherTests(unittest.TestCase):
 
     def setUp(self):
         STATE.update(version="12.1.0", flow="Resource server")
-        for k in ("authz", "redirect_uri", "api_auth", "api_tpl"):
+        for k in ("authz", "redirect_uri", "api_auth", "api_tpl", "api_ext", "ldap_uri", "ldap_authz"):
             STATE.pop(k, None)
 
     def jwt(self, claims, kid="k1", tamper=False):
@@ -321,6 +321,29 @@ class GatherTests(unittest.TestCase):
         self.assertEqual(mod.tls_policy(dict(base, **{"ssl-disable-tlsv1-2": False}), 11)[0], "allowed: TLSv1.2")
         self.assertEqual(mod.tls_policy({"ssl-min-allow-tls": "TLSv1.3"}, 12)[0], "minimum TLSv1.3")
 
+    def test_a_refused_login_after_a_pass_says_probable_cause_and_ranks_the_symptom_last(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        only = "\n".join(mod.conclusion_lines([("WARN", "certificate login passed, then the request was refused (403)", "no role for the URL.")], [], []))
+        self.assertIn("**Probable cause: certificate login passed, then the request was refused (403)**", only)
+        self.assertIn("the request was refused (HTTP 403) after the login passed", only)
+        both = "\n".join(mod.conclusion_lines([("WARN", "certificate login passed, then the request was refused (403)", "no role."),
+                                              ("WARN", "p: the LDAP connection is not encrypted", "clear text.")], [], []))
+        self.assertIn("**Probable cause: p: the LDAP connection is not encrypted**", both)
+
+    def test_a_log_row_failure_adds_the_warning_that_names_the_cause(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = "\n".join(mod.conclusion_lines([("FAIL", "CERTIFICATE error, first at 2026-01-01 10:00:00.000 (1 time)", "`[Event:id=External Authenticate] unknown user` - Four causes write this same line."),
+                                              ("WARN", "p: ldap-attribute `x` while the DN starts with uid=", "the entry may lack it. More."),
+                                              ("WARN", "client certificate #1 expires soon", "29 days left")], [], []))
+        self.assertIn("Also look at: **p: ldap-attribute `x` while the DN starts with uid=**", text)
+        self.assertNotIn("expires soon**", text)
+
     def test_conclusion_text_helpers(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("gather", SCRIPT)
@@ -340,6 +363,53 @@ class GatherTests(unittest.TestCase):
                                                   ("FAIL", "OAUTH error, first at 2026-01-01 10:00:01.000 (1 time)", "`[Event:id=OAuth Status] other line` - The explained cause is here. More about it.")], [], []))
         self.assertIn("The explained cause is here. More about it.", hintless)
         self.assertIn("2 failure(s) and 0 warning(s)", fail)
+
+    def test_the_ldap_area_probes_the_directory_like_the_certificate_area(self):
+        r, s, out = self.run_gather("ldap", "--external-security", "ld")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| ld: the LDAP server answers on 127.0.0.1:9")
+        STATE["ldap_uri"] = "ldap://no-such-host.invalid:389"
+        r, s, out = self.run_gather("ldap", "--external-security", "ld")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| ld: the LDAP host name resolves")
+        self.assertIn("**Root cause to look at first: ld: the LDAP host name resolves**", s)
+
+    def test_the_ldap_area_prints_the_commands_that_tell_the_search_account_from_the_user_bind(self):
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"the search account `ldapwhoami -x(?: -ZZ)? -H ldap://127.0.0.1:9 -D \"")
+        self.assertIn("then the user's own bind `ldapwhoami", s)
+        self.assertNotIn("SECRETVALUE", s)
+
+    def test_a_refused_bind_hint_says_the_log_cannot_tell_search_account_from_user(self):
+        win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", *win)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("and the ErrorLog does not say which (the lines are identical in both cases)", s)
+
+    def test_a_directory_user_is_not_a_failure_with_authorization_ldap(self):
+        STATE["ldap_authz"] = "ldap"
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--user-name", "nobody")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*INFO\*\* \| user nobody is not a MarkLogic user")
+        self.assertNotIn("user nobody exists", s)
+        STATE["ldap_authz"] = "internal"
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--user-name", "nobody")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| user nobody exists")
+
+    def test_appserver_names_a_server_without_the_profile(self):
+        STATE["api_ext"] = []
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--appserver", "api")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(s, r"\*\*FAIL\*\* \| app server api has an external security profile")
+        self.assertIn("externalAuthenticate failed because no external security is configured", s)
+        STATE["api_ext"] = ["oa"]
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--appserver", "api")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| app server api uses a LDAP profile")
+        STATE.pop("api_ext")
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--appserver", "api")
+        self.assertRegex(s, r"\*\*PASS\*\* \| app server api uses a LDAP profile \| ld")
+        r, s, out = self.run_gather("ldap", "--external-security", "ld", "--no-probe", "--appserver", "nope")
+        self.assertRegex(s, r"\*\*FAIL\*\* \| app server nope exists")
 
     def test_an_oauth_profile_on_an_app_server_that_is_not_oauth_is_warned_about(self):
         STATE["api_auth"] = "basic"
@@ -878,8 +948,8 @@ class CertHandler(BaseHTTPRequestHandler):
             return self.reply({"port": 9302, "authentication": "digest", "ssl-certificate-template": "T"})
         if p == "/manage/v2/external-security/cert-prof/properties":
             d = {"external-security-name": "cert-prof", "authentication": "certificate", "authorization": CSTATE.get("authz", "internal"), "cache-timeout": 300}
-            if CSTATE.get("authz") == "ldap":
-                d["ldap-server"] = {"ldap-server-uri": "ldap://ldap.example.com:389", "ldap-base": "dc=example,dc=com", "ldap-attribute": CSTATE.get("ldap_attr", "uid"),
+            if CSTATE.get("authz") == "ldap" or CSTATE.get("ldap_settings"):
+                d["ldap-server"] = {"ldap-server-uri": CSTATE.get("ldap_uri", "ldap://ldap.example.com:389"), "ldap-base": "dc=example,dc=com", "ldap-attribute": CSTATE.get("ldap_attr", "uid"),
                                     "ldap-default-user": "uid=search,ou=services,dc=example,dc=com", "ldap-password": "SECRETPW", "ldap-start-tls": True}
             return self.reply(d)
         if p == "/manage/v2/roles":
@@ -956,13 +1026,13 @@ class CertificateAreaTests(unittest.TestCase):
         cls.srv.server_close()
 
     def setUp(self):
-        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr", "tpl", "require", "min_tls", "tls_flags"):
+        for k in ("sel", "verification", "ext_sec", "errlog", "authz", "role_dns", "ldap_attr", "tpl", "require", "min_tls", "tls_flags", "ldap_uri", "ldap_settings"):
             CSTATE.pop(k, None)
 
-    def gather(self, cert=None, chain=False, extra=(), **state):
+    def gather(self, cert=None, chain=False, extra=(), probe=False, **state):
         CSTATE.update(state)
         out = tempfile.mkdtemp(prefix="msg-out.", dir=self.tmp)
-        args = [sys.executable, "-I", str(SCRIPT), "certificate", "--host", "127.0.0.1", "--port", str(CPORT), "--scheme", "http", "--user", "admin", "--out", out, "--no-probe"]
+        args = [sys.executable, "-I", str(SCRIPT), "certificate", "--host", "127.0.0.1", "--port", str(CPORT), "--scheme", "http", "--user", "admin", "--out", out] + ([] if probe else ["--no-probe"])
         if cert:
             args += ["--client-cert", str(Path(self.tmp, cert + ".pem"))]
         if chain:
@@ -1064,7 +1134,7 @@ class CertificateAreaTests(unittest.TestCase):
         self.assertNotIn("Mapping the subject DN to a MarkLogic user", s)
         self.assertIn("One log line, four causes", s)
         self.assertNotIn("SECRETPW", s)
-        self.assertRegex(s, r"\*\*PASS\*\* \| cert-prof: a role external name is a group DN under ldap-base")
+        self.assertRegex(s, r"\*\*PASS\*\* \| cert-prof: a role external name is a group DN")
         self.assertRegex(s, r"\*\*INFO\*\* \| cert-prof: LDAP results are cached")
 
     def test_a_reversed_certificate_dn_is_the_lead_for_unknown_user(self):
@@ -1075,7 +1145,8 @@ class CertificateAreaTests(unittest.TestCase):
 
     def test_a_dn_outside_ldap_base_is_a_warning_and_internal_authorization_still_maps_users(self):
         r, s = self.gather("ldapelsewhere", chain=True, authz="ldap")
-        self.assertRegex(s, r"\*\*WARN\*\* \| cert-prof: certificate DN is not under ldap-base `dc=example,dc=com`")
+        self.assertRegex(s, r"\*\*INFO\*\* \| cert-prof: certificate DN is not under ldap-base `dc=example,dc=com`")
+        self.assertIn("ldap-base is not used for a certificate lookup", s)
         r, s = self.gather("user1", chain=True, authz="internal")
         self.assertIn("Mapping the subject DN to a MarkLogic user", s)
         self.assertNotIn("four causes", s)
@@ -1085,6 +1156,32 @@ class CertificateAreaTests(unittest.TestCase):
         self.assertRegex(s, r"\*\*WARN\*\* \| cert-prof: ldap-attribute `sAMAccountName` while the certificate DN starts with uid=")
         r, s = self.gather("ldaporder", chain=True, authz="ldap", ldap_attr="uid")
         self.assertNotIn("while the certificate DN starts with uid=", s)
+
+    def test_the_ldap_settings_note_leads_the_no_user_failure(self):
+        r, s = self.gather("unmapped", chain=True, ldap_settings=True)
+        row = next(l for l in s.splitlines() if l.startswith("| **FAIL** | client certificate DN is the external name"))
+        self.assertLess(row.index("has LDAP server settings but authorization `internal`"), row.index("No user has the external name"))
+
+    def test_an_unresolvable_ldap_host_and_a_closed_port_are_named(self):
+        r, s = self.gather("ldaporder", chain=True, probe=True, authz="ldap", ldap_uri="ldap://no-such-host.invalid:389", role_dns=["cn=g,dc=example,dc=com"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-prof: the LDAP host name resolves")
+        r, s = self.gather("ldaporder", chain=True, probe=True, authz="ldap", ldap_uri="ldap://127.0.0.1:9", role_dns=["cn=g,dc=example,dc=com"])
+        self.assertRegex(s, r"\*\*FAIL\*\* \| cert-prof: the LDAP server answers on 127.0.0.1:9")
+        self.assertIn("Check the port in ldap-server-uri", s)
+
+    def test_ldap_settings_with_authorization_internal_are_named_when_no_user_matches(self):
+        r, s = self.gather("unmapped", chain=True, ldap_settings=True)
+        self.assertRegex(s, r"\*\*INFO\*\* \| cert-prof: LDAP settings are present but authorization is internal")
+        self.assertIn("has LDAP server settings but authorization `internal`", s)
+
+    def test_a_role_near_miss_warning_about_ldap_base_ranks_last_in_the_conclusion(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = "\n".join(mod.conclusion_lines([("WARN", "p: a role external name is a group DN that looks like ldap-base `x` with another suffix", "other lab role."),
+                                               ("WARN", "p: the LDAP connection is not encrypted", "clear text.")], [], []))
+        self.assertIn("look at: p: the LDAP connection is not encrypted**", text)
 
     def test_unknown_user_with_ldap_authorization_gets_its_own_hint(self):
         win = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z"]

@@ -41,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -944,7 +945,7 @@ def bound_servers(c, names):
     return out
 
 
-def describe_users(c, role_map_note):
+def describe_users(c, role_map_note, required=True):
     """The --user-name section: external names, roles, role external names and privileges. Returns the external-name map."""
     a = c.a
     if not a.user_name:
@@ -969,8 +970,12 @@ def describe_users(c, role_map_note):
     for un in a.user_name:
         up = c.fetch("/manage/v2/users/%s/properties?format=json" % q(un), "user-%s.json" % slug(un))
         if not up:
-            say("- `%s`: could not be read (see errors)" % un)
-            check("FAIL", "user %s exists" % un, "could not read user properties")
+            if required:
+                say("- `%s`: could not be read (see errors)" % un)
+                check("FAIL", "user %s exists" % un, "could not read user properties")
+            else:
+                say("- `%s`: is not a MarkLogic user (none is needed here)" % un)
+                check("INFO", "user %s is not a MarkLogic user" % un, "with authorization `ldap` MarkLogic creates a temporary user for the login: the name is looked up in the directory, no MarkLogic user is needed")
             continue
         ens = [str(x) for x in find_all(up, "external-name")]
         roles = [str(x) for x in find_all(up, "role")]
@@ -1323,8 +1328,8 @@ OAUTH_HINTS = [
     (r"XDMP-OAUTH", "MarkLogic rejected the token or the OAuth flow; the message text says why."),
 ]
 LDAP_HINTS = [
-    (r"XDMP-LDAP-INVALID-CRED", "The directory refused a bind (error 49). It is either the search user (`ldap-default-user` and `ldap-password` of the profile) or the user who is signing in; the directory's access log shows which DN failed."),
-    (r"fail because authentication failure", "No successful login. With an XDMP-LDAP-INVALID-CRED line next to it a bind was refused (wrong password of the search user or of the user). Without one, no bind failed: the search found no entry, so check `ldap-base`, `ldap-attribute` and the exact user name."),
+    (r"XDMP-LDAP-INVALID-CRED", "The directory refused a bind (error 49). It is either the search user (`ldap-default-user` and `ldap-password` of the profile) or the user who is signing in, and the ErrorLog does not say which (the lines are identical in both cases): the directory's access log shows the DN that failed, or run the `ldapwhoami` commands printed with the profile settings."),
+    (r"fail because authentication failure", "No successful login. If no XDMP-LDAP-INVALID-CRED line stands next to it, no bind failed: the search found no entry, so check `ldap-base`, `ldap-attribute` and the exact user name. With such a line a bind was refused (wrong password of the search user or of the user, see the hint of that line)."),
     (r"ldapAuthenticate\(\) fail$", "The directory side gave no error. With authorization `internal` MarkLogic needs a user whose external name is the user's full DN (for example uid=jdoe,dc=example,dc=com); a short name does not match. See the user table of this report."),
     (r"fail because no LDAP user", "The bind worked but the search found no entry: check `ldap-base` and `ldap-attribute` with the exact user name."),
     (r"certificateAuthenticate\(\) fail because no user", "Certificate authentication found no MarkLogic user whose external name equals the DN shown."),
@@ -1881,11 +1886,68 @@ def looks_like_dn(s):
     return bool(re.match(r"^[a-z][\w-]*=[^,=]+(,[a-z][\w-]*=[^,=]+)+$", dn_norm(s)))
 
 
-def check_group_dns(n, base, role_map):
+def probe_ldap_server(n, pp):
+    """The directory a profile points at, checked from this machine: does the host resolve, does the port answer, does the TLS the URI asks for work."""
+    uri = str(first(pp, "ldap-server-uri") or "")
+    m = re.match(r"(ldaps?)://([^/:]+)(?::(\d+))?", uri)
+    if not m:
+        return False
+    scheme, host, port = m.group(1), m.group(2), int(m.group(3) or (636 if m.group(1) == "ldaps" else 389))
+    starttls = str(first(pp, "ldap-start-tls")).lower() == "true"
+    say("#### Directory server `%s` (checked from this machine)" % ("%s:%d" % (host, port)))
+    say("")
+    try:
+        socket.getaddrinfo(host, port)
+    except socket.gaierror as e:
+        check("FAIL", "%s: the LDAP host name resolves" % n,
+              "`%s` does not resolve (%s): MarkLogic cannot reach the directory, so every login through this profile fails (HTTP 401). Correct the host name in ldap-server-uri" % (host, e.strerror or e))
+        say("")
+        return False
+    try:
+        socket.create_connection((host, port), timeout=8).close()
+    except OSError as e:
+        check("FAIL", "%s: the LDAP server answers on %s:%d" % (n, host, port),
+              "no connection to %s:%d (%s): MarkLogic waits for the directory and the login hangs or fails. Check the port in ldap-server-uri (389 for LDAP and StartTLS, 636 for ldaps) and the network" % (host, port, str(e) or type(e).__name__))
+        say("")
+        return False
+    check("PASS", "%s: the LDAP server answers on %s:%d" % (n, host, port), "TCP connection accepted")
+    ok = True
+    if scheme == "ldaps":
+        pr = tls_probe(host, port)
+        if pr.get("error"):
+            ok = False
+            check("FAIL", "%s: TLS on connect works on %s:%d" % (n, host, port),
+                  "the URI is ldaps:// (TLS from the first byte) but the TLS handshake fails: %s. Port 389 speaks plain LDAP: use ldap:// there with start TLS, or ldaps:// on port 636" % pr["error"])
+        else:
+            check("PASS", "%s: TLS on connect works on %s:%d" % (n, host, port), "handshake ok (%s)" % (pr.get("protocol") or "TLS"))
+    elif starttls:
+        pr = tls_probe(host, port, starttls="ldap")
+        if pr.get("error"):
+            ok = False
+            check("FAIL", "%s: StartTLS works on %s:%d" % (n, host, port), "ldap-start-tls is true but the StartTLS handshake fails: %s" % pr["error"])
+        else:
+            check("PASS", "%s: StartTLS works on %s:%d" % (n, host, port), "handshake ok (%s)" % (pr.get("protocol") or "TLS"))
+    else:
+        check("WARN", "%s: the LDAP connection is not encrypted" % n,
+              "ldap:// without start TLS sends the search account's password in clear text; the directory may still accept the bind. Set ldap-start-tls true or use ldaps://")
+    say("")
+    return ok
+
+
+def check_group_dns(n, base, role_map, use_base=True):
     """Authorization ldap: role external names must equal the user's group DNs. The directory is not read, but a role external
     name that is a DN outside ldap-base (a typo in the suffix) can be found from the MarkLogic side."""
     nb = dn_norm(base)
     dns = [e for e in role_map if looks_like_dn(e)]
+    fmt = lambda es: "; ".join("`%s` (role %s)" % (e, ", ".join(role_map[e])) for e in es)
+    if not use_base:
+        # certificate authentication does not use ldap-base (the certificate DN is the search base): only whether a group DN exists as a role external name
+        if dns:
+            check("PASS", "%s: a role external name is a group DN" % n, fmt(dns[:6]) + (" ..." if len(dns) > 6 else ""))
+        else:
+            check("WARN", "%s: no role external name is a group DN" % n,
+                  "authorization is `ldap`, so a login only gets roles whose external name equals one of the user's memberOf DNs, and no role external name looks like a DN: give a role the full DN of a group the user is a member of")
+        return
     under = [e for e in dns if dn_norm(e) == nb or dn_norm(e).endswith("," + nb)]
     outside = [e for e in dns if e not in under]
     fmt = lambda es: "; ".join("`%s` (role %s)" % (e, ", ".join(role_map[e])) for e in es)
@@ -1907,6 +1969,34 @@ def check_group_dns(n, base, role_map):
         check("INFO", "%s: other role external names are DNs outside ldap-base" % n, fmt(far) + ". Harmless if they belong to another directory (external names are cluster-wide)")
 
 
+def check_named_appserver(c, name, group, profile_names, kind):
+    """--appserver: the named app server must use one of the profiles (and the authentication it needs)."""
+    servers = c.fetch("/manage/v2/servers?format=json", "servers-list.json", keep=False)
+    found = None
+    for k, v in walk(servers or {}):
+        if k == "list-item":
+            for it in (v if isinstance(v, list) else [v]):
+                if isinstance(it, dict) and it.get("nameref") == name and (not group or it.get("groupnameref", "Default") == group):
+                    found = it
+    say("## App server `%s`" % name)
+    say("")
+    if not found:
+        check("FAIL", "app server %s exists" % name, "no app server of that name%s" % (" in group `%s`" % group if group else ""))
+        say("")
+        return
+    sp = c.fetch("/manage/v2/servers/%s/properties?group-id=%s&format=json" % (q(name), q(found.get("groupnameref", "Default"))), "server-%s.json" % slug(name), keep=True)
+    used = [str(x) for x in find_all(sp or {}, "external-security")]
+    say("- authentication `%s`, internal-security `%s`, external-security `%s`" % (first(sp or {}, "authentication"), first(sp or {}, "internal-security"), ", ".join(used) or "none"))
+    say("")
+    if not used:
+        check("FAIL", "app server %s has an external security profile" % name,
+              "none is attached: the ErrorLog says `externalAuthenticate failed because no external security is configured` and every login is refused (HTTP 401). The %s profile(s) `%s` exist but are used by no app server; select one in the app server's external security setting" % (kind.upper(), ", ".join(sorted(profile_names))))
+    elif not any(u in profile_names for u in used):
+        check("FAIL", "app server %s uses a %s profile" % (name, kind.upper()), "its external-security is `%s`, none of the %s profile(s) `%s`" % (", ".join(used), kind.upper(), ", ".join(sorted(profile_names))))
+    else:
+        check("PASS", "app server %s uses a %s profile" % (name, kind.upper()), ", ".join(u for u in used if u in profile_names))
+
+
 def run_ldap(c):
     a = c.a
     say("## LDAP external security profiles")
@@ -1919,6 +2009,12 @@ def run_ldap(c):
         say("The bind password is never read out here; it is removed before saving.")
         say("")
         uri = first(props, "ldap-server-uri")
+        if first(props, "ldap-default-user"):
+            tls = " -ZZ" if str(first(props, "ldap-start-tls")).lower() == "true" else ""
+            say("To tell which bind the directory refuses (error 49 in the ErrorLog names neither DN), test them from a shell: the search account `ldapwhoami -x%s -H %s -D \"%s\" -W`, "
+                "then the user's own bind `ldapwhoami -x%s -H %s -D \"<the user's DN>\" -W` (the DN the search finds for the user name, normally `%s=<user>,%s`)." % (
+                    tls, uri or "<ldap-server-uri>", first(props, "ldap-default-user"), tls, uri or "<ldap-server-uri>", first(props, "ldap-attribute") or "uid", first(props, "ldap-base") or "<ldap-base>"))
+            say("")
         for k in ("ldap-server-uri", "ldap-base", "ldap-attribute"):
             if not first(props, k):
                 check("FAIL", "%s: %s is set" % (n, k), "empty")
@@ -1942,16 +2038,9 @@ def run_ldap(c):
                        for k, v in walk(props) if not isinstance(v, (dict, list)))
         if getattr(a, "no_probe", False):
             continue
-        say("#### Directory server %s:%s (checked from this machine)" % (host, port))
-        say("")
+        ok = probe_ldap_server(n, props)
         tls_lines_note()
-        if scheme == "ldap" and not starttls:
-            try:
-                socket_ok = subprocess.run(["bash", "-c", "exec 3<>/dev/tcp/%s/%s" % (host, port)], capture_output=True, timeout=10).returncode == 0
-            except Exception:  # noqa: BLE001
-                socket_ok = None
-            check("PASS" if socket_ok else "WARN", "%s: directory port reachable" % n, "%s:%s (plain LDAP)" % (host, port))
-            check("WARN", "%s: connection is not encrypted" % n, "ldap:// without start TLS sends the bind password and user names in clear text")
+        if not ok or (scheme == "ldap" and not starttls):
             continue
         pr = tls_probe(host, port, starttls="ldap" if scheme == "ldap" else None)
         infos = analyse_tls_chain(c, "directory %s:%s" % (host, port), pr, host)
@@ -1971,6 +2060,8 @@ def run_ldap(c):
             check("PASS" if hit else "WARN", "%s: directory chain is trusted by MarkLogic" % n,
                   ("found in MarkLogic's certificate authorities: %s" % hit) if hit else "no certificate of the chain is in MarkLogic's trusted certificate authorities")
     bound = bound_servers(c, set(profiles)) if profiles else []
+    if getattr(a, "appserver", None) and profiles:
+        check_named_appserver(c, a.appserver, a.group, set(profiles), "ldap")
     role_map = None
     if profiles and any(str(first(p, "authorization")) == "ldap" for p in profiles.values()):
         role_map = load_role_map(c.api, c.out, c.errors)
@@ -1978,7 +2069,7 @@ def run_ldap(c):
         for n, props in profiles.items():
             if str(first(props, "authorization")) == "ldap" and first(props, "ldap-base"):
                 check_group_dns(n, first(props, "ldap-base"), role_map)
-    describe_users(c, "With authorization `internal`, the LDAP user is matched to a MarkLogic user's external name; with `ldap`, the user's group DNs are matched to the external names of roles.")
+    describe_users(c, required=not (profiles and all(str(first(p, "authorization")) == "ldap" for p in profiles.values())), role_map_note="With authorization `internal`, the LDAP user is matched to a MarkLogic user's external name; with `ldap`, the user's group DNs are matched to the external names of roles.")
     if a.logs:
         analyse_logs_generic(c, "ldap", bound)
     elif profiles:
@@ -2253,8 +2344,8 @@ def check_ldap_dn(n, pp, leaf, dn):
         check("WARN", "%s: certificate DN starts with a general RDN (%s=)" % (n, types[0].upper()),
               "`%s` is searched as stored and a directory DN normally starts with its most specific RDN (uid=, cn=). If the DN is the reverse of the entry's DN the login fails with `unknown user`" % dn)
     else:
-        check("WARN", "%s: certificate DN is not under ldap-base `%s`" % (n, base),
-              "`%s`: MarkLogic searches the DN itself, so it works only if exactly that entry exists in the directory (run the command above)" % dn)
+        check("INFO", "%s: certificate DN is not under ldap-base `%s`" % (n, base),
+              "`%s`: ldap-base is not used for a certificate lookup (MarkLogic searches the DN itself), so this is harmless when that entry exists in the directory (run the command above)" % dn)
     if types and types[0] == "uid" and attr.lower() != "uid":
         check("WARN", "%s: ldap-attribute `%s` while the certificate DN starts with uid=" % (n, attr),
               "MarkLogic reads the user name from the attribute `%s` of the entry it finds. An entry identified by uid=... may not have `%s` (for example `sAMAccountName` is an Active Directory attribute): "
@@ -2316,6 +2407,8 @@ def check_client_cert(c, a, servers, profs=None):
             continue
         check_issuer_selection(c, nm, leaf, pool + sel, sel, str(first(sp, "ssl-client-issuer-authority-verification")).lower() == "true")
     profs = profs or {}
+    internal_ldap = [pn for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "internal" and first(pp, "ldap-server-uri")]
+    ldap_note = (" The profile %s has LDAP server settings but authorization `internal`: the directory is not consulted, so the DN must be the external name of a MarkLogic user; set authorization to ldap to use the LDAP groups." % ", ".join("`%s`" % x for x in internal_ldap)) if internal_ldap else ""
     ldap_profiles = {pn: pp for pl in profs.values() for pn, pp in pl if str(first(pp, "authorization")) == "ldap"}
     for pn, pp in ldap_profiles.items():
         check_ldap_dn(pn, pp, leaf, dn)
@@ -2365,8 +2458,8 @@ def check_client_cert(c, a, servers, profs=None):
                   "Set the external name to `%s`" % (", ".join(sum([us for _, us in cn_only], [])), cn, dn))
         else:
             check("FAIL", "client certificate DN is the external name of a MarkLogic user",
-                  "no user has the external name `%s`: TLS accepts the certificate, then the login fails with `certificateAuthenticate() fail because no user` (HTTP 401). "
-                  "Create a user, or add this DN as an external name of one%s" % (dn, ("; similar external names: " + "; ".join("`%s`" % en for en, _ in like)) if like else ""))
+                  "%s user has the external name `%s`: TLS accepts the certificate, then the login fails with `certificateAuthenticate() fail because no user` (HTTP 401). "
+                  "Create a user, or add this DN as an external name of one%s." % (ldap_note.strip() + " No" if ldap_note else "no", dn, ("; similar external names: " + "; ".join("`%s`" % en for en, _ in like)) if like else ""))
     say("")
 
 
@@ -2402,6 +2495,7 @@ def run_certificate(c):
         missing("App servers using certificate authentication", "none has authentication `certificate`", "pass --appserver <name> to check one anyway")
     probe_host = a.probe_host or a.host
     profs = {}
+    internal_with_ldap = set()
     for nm, grp, sp in chosen:
         port = first(sp, "port")
         say("### `%s` (group `%s`, port %s)" % (nm, grp, port))
@@ -2438,6 +2532,13 @@ def run_certificate(c):
                             check("FAIL", "%s: %s is set" % (pn, k), "empty")
                     check("INFO", "%s: LDAP results are cached" % pn,
                           "for cache-timeout (%s s) per profile: a change in the directory (group membership, a new entry) shows only after that; set it to 1 for a test" % first(pp, "cache-timeout"))
+                    if not getattr(a, "no_probe", False):
+                        probe_ldap_server(pn, pp)
+                elif pz == "internal" and first(pp, "ldap-server-uri"):
+                    internal_with_ldap.add(pn)
+                    check("INFO", "%s: LDAP settings are present but authorization is internal" % pn,
+                          "the profile holds LDAP server settings (%s) but authorization is `internal`: the directory is not consulted; the certificate DN must be the external name of a MarkLogic user. "
+                          "Set authorization to ldap if the roles should come from LDAP groups" % first(pp, "ldap-server-uri"))
                 elif pz not in ("internal", "None"):
                     check("INFO", "%s: profile %s authorization" % (nm, pn), "`%s`; the certificate labs tested use `internal` (the DN is matched to a user's external name) or `ldap`" % pz)
         pems = [p for p in find_all(sp, "ssl-client-certificate-pem") if isinstance(p, str)]
@@ -2513,8 +2614,7 @@ def run_certificate(c):
         role_map = load_role_map(c.api, c.out, c.errors)
         if role_map is not None:
             for pn, pp in ldap_profiles.items():
-                if first(pp, "ldap-base"):
-                    check_group_dns(pn, first(pp, "ldap-base"), role_map)
+                check_group_dns(pn, first(pp, "ldap-base") or "", role_map, use_base=False)
         say("With authorization `ldap` switch on the trace events External Authenticate, LDAP and LDAP Search for the log part (`ml-trace-events.py enable --preset ldap`).")
         say("")
     if a.client_cert:
@@ -2874,6 +2974,8 @@ def conclusion_lines(checks, not_collected, errors):
         return kept[:1].upper() + kept[1:] if re.match(r"[a-z]+( |$)", kept) else kept
 
     out = ["## Conclusion", ""]
+    noise = lambda n: "expires soon" in n or "looks like ldap-base" in n
+    marker = lambda n: re.search(r"never came back|no SAML response came back|passed, then the request was refused", n)
     if fails:
         # a bare log line without an explanation is a symptom: prefer the first failure that explains itself
         r, n, d = next((x for x in fails if not (" error, first at " in x[1] and " - " not in x[2]) and len(x[2]) >= 40), None) or \
@@ -2881,18 +2983,25 @@ def conclusion_lines(checks, not_collected, errors):
         out.append("**Root cause to look at first: %s**" % n)
         out.append("")
         out.append(first_sentence(d))
+        if " error, first at " in n:   # the first failure is a log line: a warning from the settings may name the cause
+            lead = next((x for x in warns if not noise(x[1]) and not marker(x[1])), None)
+            if lead:
+                out.append("")
+                out.append("Also look at: **%s**. %s" % (lead[1], first_sentence(lead[2])))
         out.append("")
         out.append("(%d failure(s) and %d warning(s) in total. The table \"Check results\" near the end lists them all, failures first; later failures are often consequences of the first.)" % (len(fails), len(warns)))
     elif warns:
         stalled = [x for x in uniq if x[0] in ("WARN", "INFO") and re.search(r"never came back|no SAML response came back", x[1])]
-        ranked = sorted(warns, key=lambda x: ("expires soon" in x[1], bool(re.search(r"never came back", x[1]))))   # expiry and the symptom last
+        refused = [x for x in uniq if x[0] == "WARN" and re.search(r"passed, then the request was refused", x[1])]
+        ranked = sorted(warns, key=lambda x: (noise(x[1]), bool(marker(x[1]))))   # expiry, other roles' near misses and the symptoms last
         r, n, d = ranked[0]
-        if stalled:
+        if stalled or refused:
             out.append("**Probable cause: %s**" % n)
             out.append("")
             out.append(first_sentence(d))
             out.append("")
-            out.append("(%d warning(s) and no failure, but the login did not complete: the browser was sent to the IdP and no response came back.)" % len(warns))
+            out.append("(%d warning(s) and no failure, but %s.)" % (len(warns), "the login did not complete: the browser was sent to the IdP and no response came back" if stalled
+                                                                   else "the request was refused (HTTP 403) after the login passed"))
         else:
             out.append("**No failure found. %d warning(s); look at: %s**" % (len(warns), n))
             out.append("")
@@ -3018,7 +3127,7 @@ Fuller run (token rejected):
       --token token.txt --logs --start 2026-01-15T09:00:00Z""", [base, prof, logs, probe])
     s.add_argument("--token", metavar="FILE", help="file holding a captured access token (JWT) or an Authorization: Bearer header line")
 
-    add("ldap", "LDAP external security profile", """LDAP: read the profile, its certificates, check the directory server's TLS from this machine and against MarkLogic's
+    s = add("ldap", "LDAP external security profile", """LDAP: read the profile, its certificates, check the directory server's TLS from this machine and against MarkLogic's
 trusted CAs, the user/role external names and the LDAP trace in the logs. Only --host and --user are required.
 
 Smallest useful run:
@@ -3026,6 +3135,8 @@ Smallest useful run:
 Fuller run (login problem):
   ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile> \\
       --user-name <MarkLogic user> --logs --start 2026-01-15T09:00:00Z""", [base, prof, logs, probe])
+    s.add_argument("--appserver", metavar="NAME", help="also check that this app server uses the profile (names an app server with no external security profile attached)")
+    s.add_argument("--group", help="group of that app server (default: any)")
 
     s = add("https", "HTTPS-enabled app server (TLS settings and the certificate it serves)", """HTTPS: read the app server's TLS settings and certificate template, and look at what the port really serves: the certificate
 chain, host name match, expiry, protocol versions and cipher. Without --appserver every app server that has a certificate
