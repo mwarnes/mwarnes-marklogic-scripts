@@ -336,3 +336,48 @@ def load_record(path: str) -> dict:
             or not isinstance(clone.get("name"), str) or not isinstance(clone.get("port"), int)):
         fail(f"'{path}' is missing the group or clone name/port", record)
     return record
+
+
+def restart_hosts(body) -> list:
+    """(host-id, last-startup) pairs from a 202 restart response body; [] if absent."""
+    try:
+        return [(entry["host-id"], entry["value"]) for entry in body["restart"]["last-startup"]]
+    except (KeyError, TypeError):
+        return []
+
+
+def _retryable(error: CloneError) -> bool:
+    return isinstance(error, TransportError) or (isinstance(error, ApiError) and error.status >= 500)
+
+
+def wait_for_restart(client, body, timeout: float = 180, interval: float = 2,
+                     sleep=time.sleep, clock=time.monotonic) -> None:
+    """Block until every host named in a 202 restart body has restarted."""
+    pending = dict(restart_hosts(body))
+    deadline = clock() + timeout
+    if not pending:
+        sleep(interval)  # no details: give the restart a chance to begin before polling
+    while True:
+        try:
+            if pending:
+                for host_id, old in list(pending.items()):
+                    status = client.get_json("/manage/v2/hosts/" + urllib.parse.quote(host_id, safe=""),
+                                             {"view": "status", "format": "json"})
+                    try:
+                        current = status["host-status"]["status-properties"]["status-detail"]["last-startup"]["value"]
+                    except (KeyError, TypeError):
+                        continue
+                    if current != old:
+                        del pending[host_id]
+                if not pending:
+                    return
+            else:
+                client.get_json("/manage/v2", {"format": "json"})
+                return
+        except (ApiError, TransportError) as e:
+            if not _retryable(e):
+                raise
+        if clock() >= deadline:
+            raise CloneError(f"MarkLogic did not finish restarting within {int(timeout)}s", EXIT_API,
+                             hint="the change was submitted; check the Admin UI before trying again")
+        sleep(interval)

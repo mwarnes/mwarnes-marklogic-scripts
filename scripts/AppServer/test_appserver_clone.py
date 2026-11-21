@@ -384,5 +384,79 @@ class RecordTests(unittest.TestCase):
         self.assertIn("Groups → Default → App Servers → AppServices-Digest → Delete", cm.exception.hint)
 
 
+def host_status(value):
+    return {"host-status": {"status-properties": {"status-detail": {"last-startup": {"units": "datetime", "value": value}}}}}
+
+
+class ScriptedClient:
+    """Returns (or raises) the next scripted item on every get_json call."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.paths = []
+
+    def get_json(self, path, params=None):
+        self.paths.append(path)
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+RESTART_BODY = {"restart": {"last-startup": [{"host-id": "123", "value": "t0"}]}}
+
+
+class WaitForRestartTests(unittest.TestCase):
+    def wait(self, client, body, timeout=180):
+        clock = FakeClock()
+        ac.wait_for_restart(client, body, timeout=timeout, interval=2, sleep=clock.sleep, clock=clock)
+        return clock
+
+    def test_restart_hosts(self):
+        self.assertEqual(ac.restart_hosts(RESTART_BODY), [("123", "t0")])
+        self.assertEqual(ac.restart_hosts(None), [])
+        self.assertEqual(ac.restart_hosts({"x": 1}), [])
+
+    def test_waits_until_last_startup_changes(self):
+        client = ScriptedClient([
+            host_status("t0"),
+            ac.TransportError("connection refused"),
+            ac.ApiError("GET", "/manage/v2/hosts/123", 503),
+            host_status("t1"),
+        ])
+        self.wait(client, RESTART_BODY)
+        self.assertEqual(client.paths[0], "/manage/v2/hosts/123")
+        self.assertEqual(client.script, [])
+
+    def test_times_out(self):
+        client = ScriptedClient([host_status("t0")] * 200)
+        with self.assertRaises(ac.CloneError) as cm:
+            self.wait(client, RESTART_BODY, timeout=10)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
+        self.assertIn("submitted", cm.exception.hint)
+
+    def test_client_errors_are_not_retried(self):
+        client = ScriptedClient([ac.ApiError("GET", "/manage/v2/hosts/123", 401)])
+        with self.assertRaises(ac.ApiError):
+            self.wait(client, RESTART_BODY)
+
+    def test_without_restart_details_polls_manage_root(self):
+        client = ScriptedClient([ac.TransportError("refused"), {}])
+        clock = self.wait(client, None)
+        self.assertEqual(client.paths, ["/manage/v2", "/manage/v2"])
+        self.assertGreaterEqual(clock.now, 2)  # waited at least one interval before the first poll
+
+
 if __name__ == "__main__":
     unittest.main()
