@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import http.client
 import json
 import os
 import ssl
@@ -167,6 +168,8 @@ class ManageClient:
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
             raise TransportError(f"{method} {path}: cannot reach {self.base_url}: {reason}") from None
+        except (http.client.HTTPException, ValueError) as e:
+            raise TransportError(f"{method} {path}: bad response from {self.base_url}: {e!r}") from None
 
     @staticmethod
     def _json_or_none(raw: bytes):

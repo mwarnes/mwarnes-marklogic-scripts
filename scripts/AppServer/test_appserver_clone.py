@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import copy
 import datetime
+import http.client
 import importlib.util
 import io
 import json
@@ -167,6 +168,18 @@ class ManageClientTests(unittest.TestCase):
             client.get_json("/manage/v2")
         self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
         self.assertIn("Connection refused", str(cm.exception))
+
+    def test_truncated_response_becomes_transport_error(self):
+        client, _ = self.client(http.client.IncompleteRead(b"partial"))
+        with self.assertRaises(ac.TransportError) as cm:
+            client.get_json("/manage/v2")
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
+
+    def test_unsupported_auth_scheme_becomes_transport_error(self):
+        client, _ = self.client(ValueError("AbstractDigestAuthHandler does not support the following scheme: 'Negotiate'"))
+        with self.assertRaises(ac.TransportError) as cm:
+            client.get_json("/manage/v2")
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
 
 
 if __name__ == "__main__":
