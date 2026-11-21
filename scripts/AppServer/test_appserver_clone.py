@@ -182,5 +182,137 @@ class ManageClientTests(unittest.TestCase):
         self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
 
 
+SOURCE_PROPS = {
+    "server-name": "App-Services", "group-name": "Default", "server-type": "http", "port": 8000,
+    "authentication": "digest", "content-database": "Documents", "modules-database": "Modules",
+    "url-rewriter": "/MarkLogic/rest-api/8000-rewriter.xml", "output-cdata-section-localname": None,
+}
+
+
+class FakeClient:
+    """In-memory stand-in for ManageClient. Records every call."""
+
+    PREFIX = "/manage/v2/servers/"
+
+    def __init__(self, servers, props):
+        self.servers = list(servers)
+        self.props = {k: copy.deepcopy(v) for k, v in props.items()}
+        self.calls = []
+        self.post_status = 201
+        self.delete_status = 204
+        self.restart_body = None
+        self.fail_post = None
+
+    def mutating_calls(self):
+        return [c for c in self.calls if c[0] != "GET"]
+
+    def _name(self, path, suffix=""):
+        return urllib.parse.unquote(path[len(self.PREFIX):len(path) - len(suffix)])
+
+    def get_json(self, path, params=None):
+        self.calls.append(("GET", path, params))
+        if path == "/manage/v2/servers":
+            items = [{"nameref": n, "groupnameref": g} for n, g in self.servers]
+            return {"server-default-list": {"list-items": {"list-item": items}}}
+        if path.startswith(self.PREFIX) and path.endswith("/properties"):
+            key = (self._name(path, "/properties"), params["group-id"])
+            if key not in self.props:
+                raise ac.ApiError("GET", path, 404, "MANAGE-NOGROUPWITHSERVER", "no such server")
+            return copy.deepcopy(self.props[key])
+        if path == "/manage/v2":
+            return {}
+        raise AssertionError(f"unexpected GET {path}")
+
+    def post_json(self, path, params, body):
+        self.calls.append(("POST", path, params, copy.deepcopy(body)))
+        if self.fail_post:
+            raise self.fail_post
+        key = (body["server-name"], params["group-id"])
+        self.props[key] = copy.deepcopy(body)
+        self.servers.append(key)
+        return self.post_status, self.restart_body
+
+    def delete(self, path, params):
+        self.calls.append(("DELETE", path, params))
+        key = (self._name(path), params["group-id"])
+        del self.props[key]
+        self.servers.remove(key)
+        return self.delete_status, self.restart_body
+
+
+def default_fake():
+    return FakeClient(
+        [("App-Services", "Default"), ("Admin", "Default"), ("Manage", "Default")],
+        {("App-Services", "Default"): SOURCE_PROPS,
+         ("Admin", "Default"): {"server-name": "Admin", "port": 8001},
+         ("Manage", "Default"): {"server-name": "Manage", "port": 8002}},
+    )
+
+
+class LookupTests(unittest.TestCase):
+    def test_list_servers(self):
+        self.assertEqual(ac.list_servers(default_fake())[0], ("App-Services", "Default"))
+
+    def test_list_servers_empty(self):
+        self.assertEqual(ac.list_servers(FakeClient([], {})), [])
+
+    def test_resolve_single_group(self):
+        self.assertEqual(ac.resolve_group([("A", "G1"), ("B", "G2")], "B"), "G2")
+
+    def test_resolve_not_found(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.resolve_group([("A", "G1")], "Nope")
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+
+    def test_resolve_ambiguous_lists_groups(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.resolve_group([("A", "G2"), ("A", "G1")], "A")
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("G1, G2", str(cm.exception))
+        self.assertIn("--group", cm.exception.hint)
+
+    def test_resolve_explicit_group(self):
+        self.assertEqual(ac.resolve_group([("A", "G1"), ("A", "G2")], "A", "G2"), "G2")
+
+    def test_resolve_explicit_group_without_source(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.resolve_group([("A", "G1")], "A", "G2")
+        self.assertIn("G1", cm.exception.hint)
+
+    def test_ports_in_group(self):
+        fake = default_fake()
+        self.assertEqual(ac.ports_in_group(fake, ac.list_servers(fake), "Default"),
+                         {8000: "App-Services", 8001: "Admin", 8002: "Manage"})
+
+
+class PlanCloneTests(unittest.TestCase):
+    def test_default_clone_name(self):
+        self.assertEqual(ac.default_clone_name("App-Services", 8050), "App-Services-8050")
+
+    def test_payload_differs_only_in_name_and_port(self):
+        payload = ac.plan_clone(SOURCE_PROPS, "AppServices-Digest", 9000, {"App-Services"}, {8000: "App-Services"})
+        self.assertEqual(payload["server-name"], "AppServices-Digest")
+        self.assertEqual(payload["port"], 9000)
+        changed = {k for k in set(payload) | set(SOURCE_PROPS) if payload.get(k, "<absent>") != SOURCE_PROPS.get(k, "<absent>")}
+        self.assertEqual(changed, {"server-name", "port"})
+
+    def test_source_not_mutated(self):
+        before = copy.deepcopy(SOURCE_PROPS)
+        ac.plan_clone(SOURCE_PROPS, "X", 9000, set(), {})
+        self.assertEqual(SOURCE_PROPS, before)
+
+    def test_name_conflict(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.plan_clone(SOURCE_PROPS, "App-Services", 9000, {"App-Services"}, {})
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("Default", str(cm.exception))
+
+    def test_port_conflict_names_owner(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.plan_clone(SOURCE_PROPS, "X", 8001, set(), {8001: "Admin"})
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("Admin", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

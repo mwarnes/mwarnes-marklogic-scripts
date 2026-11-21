@@ -194,3 +194,67 @@ class ManageClient:
     def delete(self, path: str, params):
         status, raw = self._request("DELETE", path, params)
         return status, self._json_or_none(raw)
+
+
+def list_servers(client) -> list:
+    """Every app server in the cluster as (name, group) pairs."""
+    data = client.get_json("/manage/v2/servers", {"format": "json"})
+    items = data.get("server-default-list", {}).get("list-items", {}).get("list-item", []) or []
+    return [(item["nameref"], item["groupnameref"]) for item in items]
+
+
+def resolve_group(servers, name: str, group: str | None = None) -> str:
+    """Find the group holding app server `name`; `group` (from --group) narrows the search."""
+    groups = sorted({g for n, g in servers if n == name})
+    if group is not None:
+        if group in groups:
+            return group
+        hint = f"'{name}' exists in: {', '.join(groups)}" if groups else None
+        raise CloneError(f"app server '{name}' not found in group '{group}'", EXIT_PREFLIGHT, hint=hint)
+    if not groups:
+        raise CloneError(f"app server '{name}' not found in any group", EXIT_PREFLIGHT,
+                         hint="names are case-sensitive; check the spelling in the Admin UI")
+    if len(groups) > 1:
+        raise CloneError(f"app server '{name}' exists in several groups: {', '.join(groups)}", EXIT_PREFLIGHT,
+                         hint="choose one with --group")
+    return groups[0]
+
+
+def get_properties(client, name: str, group: str) -> dict:
+    return client.get_json(server_path(name, "/properties"), {"group-id": group, "format": "json"})
+
+
+def ports_in_group(client, servers, group: str) -> dict:
+    """{port: app server name} for every app server in `group`."""
+    used = {}
+    for name, server_group in servers:
+        if server_group == group:
+            port = get_properties(client, name, group).get("port")
+            if port is not None:
+                used[int(port)] = name
+    return used
+
+
+def default_clone_name(source: str, port: int) -> str:
+    return f"{source}-{port}"
+
+
+def plan_clone(source_props: dict, name: str, port: int, existing_names, used_ports: dict) -> dict:
+    """Check the clone's name and port are free and return the POST payload.
+
+    The payload is the source's properties with only server-name and port changed
+    (minus anything listed in STRIP_ON_POST).
+    """
+    group = source_props.get("group-name", "?")
+    if name in existing_names:
+        raise CloneError(f"an app server named '{name}' already exists in group '{group}'", EXIT_PREFLIGHT,
+                         hint="choose another name with --name")
+    if port in used_ports:
+        raise CloneError(f"port {port} is already used by app server '{used_ports[port]}' in group '{group}'",
+                         EXIT_PREFLIGHT, hint="choose another --port")
+    payload = copy.deepcopy(source_props)
+    for key in STRIP_ON_POST:
+        payload.pop(key, None)
+    payload["server-name"] = name
+    payload["port"] = port
+    return payload
