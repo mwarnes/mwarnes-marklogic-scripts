@@ -454,9 +454,15 @@ def cmd_remove(client, config: Config, args, record: dict, stdin=None, input_fn=
     stdin = stdin or sys.stdin
     group, name, port = record["group"], record["clone"]["name"], record["clone"]["port"]
 
-    if record.get("marklogic-host") != config.host:
-        print(f"warning: record was created via host '{record.get('marklogic-host')}', "
-              f"MARKLOGIC_HOST is '{config.host}'; continuing because name, group and port are checked",
+    record_host = record.get("marklogic-host")
+    if record_host != config.host:
+        if args.yes and not args.dry_run:
+            raise CloneError(f"record was created via host '{record_host}' but MARKLOGIC_HOST is "
+                             f"'{config.host}'; refusing to delete with --yes", EXIT_PREFLIGHT,
+                             hint="if this is the same cluster under another name, "
+                                  "re-run without --yes and confirm at the prompt")
+        print(f"warning: record was created via host '{record_host}', "
+              f"MARKLOGIC_HOST is '{config.host}'; check the details below before confirming",
               file=out)
     try:
         current = get_properties(client, name, group)
@@ -543,8 +549,10 @@ remove:
   --remove FILE deletes the app server described by a record this script saved. It
   checks the app server still exists with the recorded name, group and port, asks for
   confirmation (--yes skips the question), deletes it, waits for MarkLogic to restart,
-  and renames FILE to FILE.removed. Without a usable record nothing is deleted: remove
-  the app server in the Admin UI instead (Groups > GROUP > App Servers > NAME > Delete).
+  and renames FILE to FILE.removed. If MARKLOGIC_HOST differs from the host recorded in
+  FILE, --yes is refused and you must confirm at the prompt. Without a usable record
+  nothing is deleted: remove the app server in the Admin UI instead (Groups > GROUP >
+  App Servers > NAME > Delete).
 
 --dry-run:
   Reads from the Management API and runs every check, then prints what would happen.

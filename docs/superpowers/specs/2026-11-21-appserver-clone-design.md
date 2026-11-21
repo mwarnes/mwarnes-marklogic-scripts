@@ -130,8 +130,11 @@ No credentials are stored.
 
    *G* and *NAME* come from the record when it can be parsed; otherwise the wording is generic.
    Exit 2.
-2. If `MARKLOGIC_HOST` differs from `marklogic-host`, print a warning and continue (the same cluster
-   is often reached by a different alias).
+2. If `MARKLOGIC_HOST` differs from `marklogic-host` (the same cluster is often reached by a different
+   alias): with `--yes` (and not `--dry-run`), refuse before any API call, exit 2, with a hint to re-run
+   without `--yes` and confirm at the prompt. Otherwise print a warning ("check the details below before
+   confirming") and continue; the y/N prompt shows name, group and port. `--dry-run` only warns, because it
+   never deletes. (Decided by the user in the final review.)
 3. `GET /manage/v2/servers/{name}/properties?group-id=G&format=json`:
    - 404: report "already removed", leave the record in place, exit 0.
    - Port differs from the record: refuse, exit 2.

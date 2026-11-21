@@ -698,11 +698,30 @@ class RemoveCommandTests(unittest.TestCase):
         self.assertIn("9100", str(cm.exception))
         self.assertEqual(self.fake.mutating_calls(), [])
 
-    def test_host_mismatch_warns_but_continues(self):
+    def test_host_mismatch_interactive_warns_and_continues(self):
         other = ac.load_config({**ENV, "MARKLOGIC_HOST": "ml-alias.example.com"})
-        code, out = self.run_remove(yes=True, config=other)
+        code, out = self.run_remove(yes=False, answer="y", config=other)
         self.assertEqual(code, ac.EXIT_OK)
         self.assertIn("warning", out)
+        self.assertIn("check the details below before confirming", out)
+        self.assertEqual(len([c for c in self.fake.mutating_calls() if c[0] == "DELETE"]), 1)
+
+    def test_host_mismatch_with_yes_refuses(self):
+        other = ac.load_config({**ENV, "MARKLOGIC_HOST": "ml-alias.example.com"})
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_remove(yes=True, config=other)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("--yes", str(cm.exception))
+        self.assertEqual(self.fake.calls, [])
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_host_mismatch_dry_run_with_yes_only_warns(self):
+        other = ac.load_config({**ENV, "MARKLOGIC_HOST": "ml-alias.example.com"})
+        code, out = self.run_remove(yes=True, dry_run=True, config=other)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertIn("warning", out)
+        self.assertIn("DRY RUN", out)
+        self.assertEqual(self.fake.mutating_calls(), [])
 
     def test_restart_is_waited_for(self):
         self.fake.delete_status, self.fake.restart_body = 202, RESTART_BODY
