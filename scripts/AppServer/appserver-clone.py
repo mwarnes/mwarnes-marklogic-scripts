@@ -52,7 +52,7 @@ class ApiError(CloneError):
         self.path = path
         self.status = status
         self.message_code = message_code
-        text = f"{method} {path} → {status}"
+        text = f"{method} {path} -> {status}"
         if message_code:
             text += f" {message_code}"
         if message:
@@ -164,7 +164,11 @@ class ManageClient:
             with self._opener.open(request, timeout=self.timeout) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as e:
-            raise api_error(method, path, e.code, e.read()) from None
+            try:
+                raw = e.read() if e.fp is not None else b""
+            except Exception:
+                raw = b""
+            raise api_error(method, path, e.code, raw) from None
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
             raise TransportError(f"{method} {path}: cannot reach {self.base_url}: {reason}") from None
@@ -200,7 +204,10 @@ def list_servers(client) -> list:
     """Every app server in the cluster as (name, group) pairs."""
     data = client.get_json("/manage/v2/servers", {"format": "json"})
     items = data.get("server-default-list", {}).get("list-items", {}).get("list-item", []) or []
-    return [(item["nameref"], item["groupnameref"]) for item in items]
+    try:
+        return [(item["nameref"], item["groupnameref"]) for item in items]
+    except (KeyError, TypeError):
+        raise ApiError("GET", "/manage/v2/servers", 200, message="unexpected response format") from None
 
 
 def resolve_group(servers, name: str, group: str | None = None) -> str:
@@ -312,8 +319,8 @@ def load_record(path: str) -> dict:
             group = record.get("group")
             clone = record.get("clone")
             name = clone.get("name") if isinstance(clone, dict) else None
-        where = (f"Groups → {group} → App Servers → {name} → Delete" if isinstance(group, str) and isinstance(name, str)
-                 else "Groups → <group> → App Servers → <app server> → Delete")
+        where = (f"Groups > {group} > App Servers > {name} > Delete" if isinstance(group, str) and isinstance(name, str)
+                 else "Groups > <group> > App Servers > <app server> > Delete")
         raise CloneError(f"no usable clone record: {reason}", EXIT_PREFLIGHT,
                          hint="this script only removes app servers it created. "
                               f"Remove the app server manually in the Admin UI (port 8001): {where}")
@@ -409,6 +416,7 @@ def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_re
         e.hint = "the app server may or may not have been created; check the Admin UI before retrying"
         raise
     readback_error = None
+    interrupted = False
     try:
         if status == 202:
             print("waiting for MarkLogic to restart...", file=out)
@@ -416,6 +424,9 @@ def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_re
         properties = get_properties(client, name, group)
     except CloneError as e:
         readback_error = e
+        properties = payload
+    except KeyboardInterrupt:
+        interrupted = True
         properties = payload
 
     record = build_record(config.host, group, args.source, properties, now)
@@ -425,6 +436,10 @@ def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_re
         print(json.dumps(record, indent=2), file=out)
         raise CloneError(f"app server '{name}' WAS CREATED but the record could not be written to '{output}': {e}",
                          EXIT_API, hint="save the JSON printed above to a file; --remove needs it") from None
+    if interrupted:
+        raise CloneError(f"interrupted: app server '{name}' WAS CREATED; "
+                         f"record written from the submitted settings to '{output}'", EXIT_API,
+                         hint="check the app server in the Admin UI; --remove can use this record")
     if readback_error is not None:
         raise CloneError(f"app server '{name}' WAS CREATED but could not be read back ({readback_error}); "
                          f"record written from the submitted settings to '{output}'", EXIT_API,
@@ -469,7 +484,11 @@ def cmd_remove(client, config: Config, args, record: dict, stdin=None, input_fn=
             print("not deleted", file=out)
             return EXIT_DECLINED
 
-    status, body = client.delete(server_path(name), {"group-id": group})
+    try:
+        status, body = client.delete(server_path(name), {"group-id": group})
+    except TransportError as e:
+        e.hint = "the app server may or may not have been deleted; re-running --remove is safe"
+        raise
     if status == 202:
         print("waiting for MarkLogic to restart...", file=out)
         wait(client, body)
@@ -484,7 +503,13 @@ def cmd_remove(client, config: Config, args, record: dict, stdin=None, input_fn=
     removed = args.remove + ".removed"
     if os.path.exists(removed):
         removed += "." + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    os.replace(args.remove, removed)
+    try:
+        os.replace(args.remove, removed)
+    except OSError as e:
+        print(f"deleted app server '{name}' from group '{group}'", file=out)
+        print(f"warning: could not rename the record to {removed}: {e}; "
+              f"delete or move '{args.remove}' yourself", file=out)
+        return EXIT_OK
     print(f"deleted app server '{name}' from group '{group}'; record renamed to {removed}", file=out)
     return EXIT_OK
 

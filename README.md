@@ -99,4 +99,6 @@ read -rs MARKLOGIC_PASS && export MARKLOGIC_PASS
 ./scripts/AppServer/appserver-clone.py --remove AppServices-Digest.json
 ```
 
+Unlike the Bash scripts, this script's `--dry-run` reads from the Management API to run its checks, but changes nothing and writes no file.
+
 Tested against MarkLogic 12.1. Unit tests: `python3 -m unittest discover -s scripts/AppServer -p 'test_*.py'`.

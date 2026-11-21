@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import ssl
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -22,6 +23,7 @@ import urllib.parse
 _PATH = pathlib.Path(__file__).with_name("appserver-clone.py")
 _SPEC = importlib.util.spec_from_file_location("appserver_clone", _PATH)
 ac = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = ac
 _SPEC.loader.exec_module(ac)
 
 ENV = {"MARKLOGIC_HOST": "ml1.example.com", "MARKLOGIC_USER": "admin", "MARKLOGIC_PASS": "s3cret-pw"}
@@ -109,12 +111,12 @@ class ApiErrorTests(unittest.TestCase):
         err = ac.api_error("GET", "/manage/v2/servers/x/properties", 404, body)
         self.assertEqual(err.status, 404)
         self.assertEqual(err.message_code, "MANAGE-NOGROUPWITHSERVER")
-        self.assertEqual(str(err), "GET /manage/v2/servers/x/properties → 404 MANAGE-NOGROUPWITHSERVER: (err:FOER0000) No such group")
+        self.assertEqual(str(err), "GET /manage/v2/servers/x/properties -> 404 MANAGE-NOGROUPWITHSERVER: (err:FOER0000) No such group")
         self.assertEqual(err.exit_code, ac.EXIT_API)
 
     def test_non_json_body(self):
         err = ac.api_error("GET", "/manage/v2", 401, b"<html>Unauthorized</html>")
-        self.assertEqual(str(err), "GET /manage/v2 → 401")
+        self.assertEqual(str(err), "GET /manage/v2 -> 401")
         self.assertIn("MARKLOGIC_PASS", err.hint)
 
     def test_server_path_quotes_name(self):
@@ -133,6 +135,15 @@ class ManageClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://ml1.example.com:8002/manage/v2/servers?format=json")
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(request.get_header("Accept"), "application/json")
+
+    def test_digest_auth_failure_without_body_is_api_error(self):
+        # urllib raises HTTPError with fp=None when digest auth fails; e.read() raises KeyError before 3.10
+        err = urllib.error.HTTPError("http://x", 401, "digest auth failed", {}, None)
+        client, _ = self.client(err)
+        with self.assertRaises(ac.ApiError) as cm:
+            client.get_json("/manage/v2")
+        self.assertEqual(cm.exception.status, 401)
+        self.assertIn("MARKLOGIC_PASS", cm.exception.hint)
 
     def test_get_json_rejects_non_object(self):
         client, _ = self.client(FakeResponse(200, b"<html/>"))
@@ -253,6 +264,14 @@ def default_fake():
 class LookupTests(unittest.TestCase):
     def test_list_servers(self):
         self.assertEqual(ac.list_servers(default_fake())[0], ("App-Services", "Default"))
+
+    def test_list_servers_unexpected_shape(self):
+        class Odd:
+            def get_json(self, path, params=None):
+                return {"server-default-list": {"list-items": {"list-item": [{"groupnameref": "G"}]}}}
+        with self.assertRaises(ac.ApiError) as cm:
+            ac.list_servers(Odd())
+        self.assertIn("unexpected response format", str(cm.exception))
 
     def test_list_servers_empty(self):
         self.assertEqual(ac.list_servers(FakeClient([], {})), [])
@@ -382,7 +401,7 @@ class RecordTests(unittest.TestCase):
         pathlib.Path(self.path).write_text(json.dumps(record))
         with self.assertRaises(ac.CloneError) as cm:
             ac.load_record(self.path)
-        self.assertIn("Groups → Default → App Servers → AppServices-Digest → Delete", cm.exception.hint)
+        self.assertIn("Groups > Default > App Servers > AppServices-Digest > Delete", cm.exception.hint)
 
 
 def host_status(value):
@@ -548,6 +567,19 @@ class CloneCommandTests(unittest.TestCase):
         self.assertTrue(os.path.exists(self.output))
         self.assertEqual(ac.load_record(self.output)["clone"], {"name": "AppServices-Digest", "port": 9000})
 
+    def test_interrupt_during_wait_still_writes_record(self):
+        fake = default_fake()
+        fake.post_status, fake.restart_body = 202, RESTART_BODY
+        def interrupted(client, body):
+            raise KeyboardInterrupt
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.cmd_clone(fake, self.config, clone_args(output=self.output), out=io.StringIO(), now=NOW,
+                         wait=interrupted)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
+        self.assertIn("WAS CREATED", str(cm.exception))
+        self.assertIn("interrupted", str(cm.exception))
+        self.assertEqual(ac.load_record(self.output)["clone"], {"name": "AppServices-Digest", "port": 9000})
+
     def test_post_transport_error_hints_admin_ui(self):
         fake = default_fake()
         fake.fail_post = ac.TransportError("timed out")
@@ -607,6 +639,24 @@ class RemoveCommandTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path))
         self.assertTrue(os.path.exists(self.path + ".removed"))
         self.assertIn("deleted app server 'AppServices-Digest'", out)
+
+    def test_rename_failure_after_delete_is_a_warning(self):
+        with unittest.mock.patch.object(ac.os, "replace", side_effect=OSError(13, "Permission denied")):
+            code, out = self.run_remove(yes=True)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertIn("deleted app server 'AppServices-Digest' from group 'Default'", out)
+        self.assertIn("warning: could not rename the record", out)
+        self.assertIn(self.path, out)
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_delete_transport_error_hints_rerun(self):
+        def broken(path, params):
+            raise ac.TransportError("timed out")
+        self.fake.delete = broken
+        with self.assertRaises(ac.TransportError) as cm:
+            self.run_remove(yes=True)
+        self.assertIn("re-running --remove is safe", cm.exception.hint)
+        self.assertTrue(os.path.exists(self.path))
 
     def test_prompt_yes_deletes(self):
         code, _ = self.run_remove(answer="y")
@@ -739,7 +789,7 @@ class MainTests(unittest.TestCase):
             code, _, err = self.run_main(["App-Services", "--port", "9000", "--output", os.path.join(d, "r.json")],
                                          fake=fake)
         self.assertEqual(code, ac.EXIT_API)
-        self.assertIn("error: POST /manage/v2/servers → 400 ADMIN-PORTINUSE", err)
+        self.assertIn("error: POST /manage/v2/servers -> 400 ADMIN-PORTINUSE", err)
         self.assertNotIn("Traceback", err)
 
     def test_password_never_printed(self):
