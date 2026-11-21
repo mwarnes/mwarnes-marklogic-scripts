@@ -86,3 +86,21 @@ The scripts run on macOS (bash 3.2) and Linux; see Requirements above.
 ## Reporting problems
 
 Open an issue with the script version (`--help` header), MarkLogic version and the exact error.
+
+## App server clone (Python)
+
+`scripts/AppServer/appserver-clone.py` is a standalone script (Python 3.8+, standard library only)
+that clones an app server to a new port with identical settings, saves a JSON record of the clone,
+and can remove the clone later using only that record. Run it with no arguments for full help.
+
+```bash
+export MARKLOGIC_HOST=ml1.example.com MARKLOGIC_USER=admin
+read -rs MARKLOGIC_PASS && export MARKLOGIC_PASS
+./scripts/AppServer/appserver-clone.py App-Services --port 9000 --name AppServices-Digest --dry-run
+./scripts/AppServer/appserver-clone.py App-Services --port 9000 --name AppServices-Digest
+./scripts/AppServer/appserver-clone.py --remove AppServices-Digest.json
+```
+
+Unlike the Bash scripts, this script's `--dry-run` reads from the Management API to run its checks, but changes nothing and writes no file.
+
+Tested against MarkLogic 12.1. Unit tests: `python3 -m unittest discover -s scripts/AppServer -p 'test_*.py'`.
