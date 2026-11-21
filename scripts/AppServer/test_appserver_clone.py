@@ -314,5 +314,75 @@ class PlanCloneTests(unittest.TestCase):
         self.assertIn("Admin", str(cm.exception))
 
 
+CLONE_PROPS = dict(SOURCE_PROPS, **{"server-name": "AppServices-Digest", "port": 9000})
+NOW = datetime.datetime(2026, 11, 21, 14, 3, 11, tzinfo=datetime.timezone.utc)
+
+
+class RecordTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "AppServices-Digest.json")
+
+    def record(self):
+        return ac.build_record("ml1.example.com", "Default", "App-Services", CLONE_PROPS, now=NOW)
+
+    def test_build_record_shape(self):
+        record = self.record()
+        self.assertEqual(record["tool"], "appserver-clone")
+        self.assertEqual(record["format-version"], 1)
+        self.assertEqual(record["created"], "2026-11-21T14:03:11Z")
+        self.assertEqual(record["clone"], {"name": "AppServices-Digest", "port": 9000})
+        self.assertEqual(record["properties"], CLONE_PROPS)
+        self.assertNotIn("s3cret-pw", json.dumps(record))
+
+    def test_write_then_load_round_trip(self):
+        ac.write_record(self.path, self.record())
+        self.assertEqual(ac.load_record(self.path), self.record())
+        self.assertEqual(os.listdir(self.dir.name), ["AppServices-Digest.json"])  # no temp file left behind
+
+    def test_check_output_path_refuses_existing(self):
+        pathlib.Path(self.path).write_text("{}")
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.check_output_path(self.path)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+
+    def test_check_output_path_missing_directory(self):
+        with self.assertRaises(ac.CloneError):
+            ac.check_output_path(os.path.join(self.dir.name, "nope", "x.json"))
+
+    def test_check_output_path_ok(self):
+        ac.check_output_path(self.path)
+
+    def test_load_missing_file_gives_admin_ui_instructions(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.load_record(self.path)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("does not exist", str(cm.exception))
+        self.assertIn("Admin UI", cm.exception.hint)
+        self.assertIn("Groups", cm.exception.hint)
+
+    def test_load_invalid_json(self):
+        pathlib.Path(self.path).write_text("not json")
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.load_record(self.path)
+        self.assertIn("not valid JSON", str(cm.exception))
+
+    def test_load_foreign_json(self):
+        pathlib.Path(self.path).write_text('{"server-name": "X", "port": 1}')
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.load_record(self.path)
+        self.assertIn("not created by appserver-clone", str(cm.exception))
+        self.assertIn("Admin UI", cm.exception.hint)
+
+    def test_load_bad_version_names_server_in_hint(self):
+        record = self.record()
+        record["format-version"] = 99
+        pathlib.Path(self.path).write_text(json.dumps(record))
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.load_record(self.path)
+        self.assertIn("Groups → Default → App Servers → AppServices-Digest → Delete", cm.exception.hint)
+
+
 if __name__ == "__main__":
     unittest.main()

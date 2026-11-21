@@ -258,3 +258,81 @@ def plan_clone(source_props: dict, name: str, port: int, existing_names, used_po
     payload["server-name"] = name
     payload["port"] = port
     return payload
+
+
+def build_record(host: str, group: str, source: str, properties: dict, now=None) -> dict:
+    """The JSON record saved after a successful clone. Contains no credentials."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return {
+        "tool": TOOL,
+        "format-version": FORMAT_VERSION,
+        "created": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "marklogic-host": host,
+        "group": group,
+        "source": source,
+        "clone": {"name": properties["server-name"], "port": properties["port"]},
+        "properties": properties,
+    }
+
+
+def check_output_path(path: str) -> None:
+    """Fail before any change on the server if the record can't be written."""
+    if os.path.exists(path):
+        raise CloneError(f"output file '{path}' already exists", EXIT_PREFLIGHT,
+                         hint="rename or move it, or choose another --output")
+    directory = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(directory) or not os.access(directory, os.W_OK):
+        raise CloneError(f"cannot write the record: directory '{directory}' is missing or not writable",
+                         EXIT_PREFLIGHT, hint="choose another --output")
+
+
+def write_record(path: str, record: dict) -> None:
+    """Write to a temp file in the same directory, then rename it into place."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".appserver-clone-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def load_record(path: str) -> dict:
+    """Load and check a record written by this script, or explain how to remove the server by hand."""
+
+    def fail(reason, record=None):
+        group = name = None
+        if isinstance(record, dict):
+            group = record.get("group")
+            clone = record.get("clone")
+            name = clone.get("name") if isinstance(clone, dict) else None
+        where = (f"Groups → {group} → App Servers → {name} → Delete" if isinstance(group, str) and isinstance(name, str)
+                 else "Groups → <group> → App Servers → <app server> → Delete")
+        raise CloneError(f"no usable clone record: {reason}", EXIT_PREFLIGHT,
+                         hint="this script only removes app servers it created. "
+                              f"Remove the app server manually in the Admin UI (port 8001): {where}")
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        fail(f"'{path}' does not exist")
+    except OSError as e:
+        fail(f"cannot read '{path}': {e.strerror}")
+    except ValueError:
+        fail(f"'{path}' is not valid JSON")
+    if not isinstance(record, dict) or record.get("tool") != TOOL:
+        fail(f"'{path}' was not created by {TOOL}")
+    if record.get("format-version") != FORMAT_VERSION:
+        fail(f"'{path}' has unsupported format-version {record.get('format-version')!r}", record)
+    clone = record.get("clone")
+    if (not isinstance(record.get("group"), str) or not isinstance(clone, dict)
+            or not isinstance(clone.get("name"), str) or not isinstance(clone.get("port"), int)):
+        fail(f"'{path}' is missing the group or clone name/port", record)
+    return record
