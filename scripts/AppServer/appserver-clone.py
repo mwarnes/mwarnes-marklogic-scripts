@@ -487,3 +487,135 @@ def cmd_remove(client, config: Config, args, record: dict, stdin=None, input_fn=
     os.replace(args.remove, removed)
     print(f"deleted app server '{name}' from group '{group}'; record renamed to {removed}", file=out)
     return EXIT_OK
+
+
+DESCRIPTION = """\
+Clone a MarkLogic app server to a new port, or remove a clone that this script created.
+
+The clone is created in the same group as the source and has exactly the same properties
+as the source apart from its name and port."""
+
+EPILOG = """\
+environment (connection settings are read ONLY from these variables; there are no flags for them):
+  MARKLOGIC_HOST         required  host running the MarkLogic Management API
+  MARKLOGIC_USER         required  user with the manage-admin or admin role
+  MARKLOGIC_PASS         required  that user's password
+  MARKLOGIC_MANAGE_PORT  optional  Management API port (default 8002)
+  MARKLOGIC_SCHEME       optional  http or https (default http)
+  MARKLOGIC_CA_CERT      optional  CA bundle used to verify the HTTPS certificate
+  MARKLOGIC_INSECURE     optional  1 = do not verify the HTTPS certificate (not recommended)
+  MARKLOGIC_DEBUG        optional  1 = show Python tracebacks on errors
+
+clone:
+  Finds SOURCE in whichever group holds it (use --group if the name exists in more than
+  one group), reads its properties, checks the new name and port are free in that group,
+  and creates the clone. The name defaults to SOURCE-PORT. On success a JSON record of
+  the new app server is saved to --output (default ./NAME.json); an existing file is
+  never overwritten. The port check covers MarkLogic app servers only: it cannot see
+  other programs listening on that port.
+
+remove:
+  --remove FILE deletes the app server described by a record this script saved. It
+  checks the app server still exists with the recorded name, group and port, asks for
+  confirmation (--yes skips the question), deletes it, waits for MarkLogic to restart,
+  and renames FILE to FILE.removed. Without a usable record nothing is deleted: remove
+  the app server in the Admin UI instead (Groups > GROUP > App Servers > NAME > Delete).
+
+--dry-run:
+  Reads from the Management API and runs every check, then prints what would happen.
+  Nothing is created, deleted or written.
+
+exit codes:
+  0  success                                  1  usage or environment error
+  2  a pre-flight check failed                3  Management API, network or restart error
+  4  removal declined or not confirmed
+
+examples:
+  export MARKLOGIC_HOST=ml1.example.com MARKLOGIC_USER=admin
+  read -rs MARKLOGIC_PASS && export MARKLOGIC_PASS
+  %(prog)s App-Services --port 8050 --dry-run
+  %(prog)s App-Services --port 9000 --name AppServices-Digest
+  %(prog)s --remove AppServices-Digest.json --dry-run
+  %(prog)s --remove AppServices-Digest.json
+"""
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse that reports usage errors as CloneError (exit 1) instead of exiting with 2."""
+
+    def error(self, message):
+        raise CloneError(message, EXIT_USAGE,
+                         hint="run with --help for usage; connection settings come only from "
+                              "MARKLOGIC_* environment variables")
+
+
+def port_number(text: str) -> int:
+    if not text.isdigit() or not 1 <= int(text) <= 65535:
+        raise argparse.ArgumentTypeError(f"invalid port '{text}': must be 1-65535")
+    return int(text)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="appserver-clone.py", description=DESCRIPTION, epilog=EPILOG,
+                     formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+    parser.add_argument("source", nargs="?", metavar="SOURCE", help="name of the app server to clone")
+    parser.add_argument("--port", type=port_number, metavar="N", help="port for the clone (required to clone)")
+    parser.add_argument("--name", help="name for the clone (default: SOURCE-PORT)")
+    parser.add_argument("--group", help="group holding SOURCE (needed only if the name exists in several groups)")
+    parser.add_argument("--output", metavar="FILE", help="where to save the clone record (default: ./NAME.json)")
+    parser.add_argument("--remove", metavar="FILE", help="remove the app server described by this clone record")
+    parser.add_argument("--yes", action="store_true", help="with --remove: do not ask for confirmation")
+    parser.add_argument("--dry-run", action="store_true", help="run all checks and show what would happen; change nothing")
+    return parser
+
+
+def validate_args(args) -> None:
+    if args.remove is not None:
+        conflicts = [flag for flag, value in (("SOURCE", args.source), ("--port", args.port), ("--name", args.name),
+                                              ("--group", args.group), ("--output", args.output)) if value is not None]
+        if conflicts:
+            raise CloneError("--remove cannot be combined with " + ", ".join(conflicts), EXIT_USAGE)
+        return
+    if args.source is None:
+        raise CloneError("SOURCE (the app server to clone) is required", EXIT_USAGE, hint="run with --help for usage")
+    if args.port is None:
+        raise CloneError("--port is required when cloning", EXIT_USAGE, hint="run with --help for usage")
+    if args.yes:
+        raise CloneError("--yes only applies to --remove", EXIT_USAGE)
+
+
+def main(argv=None, environ=None, client_factory=ManageClient) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    environ = os.environ if environ is None else environ
+    parser = build_parser()
+    if not argv:
+        parser.print_help()
+        return EXIT_OK
+    try:
+        args = parser.parse_args(argv)
+        validate_args(args)
+        record = load_record(args.remove) if args.remove is not None else None
+        config = load_config(environ)
+        if config.scheme == "https" and config.insecure:
+            print("warning: MARKLOGIC_INSECURE=1: HTTPS certificate verification is disabled", file=sys.stderr)
+        client = client_factory(config)
+        if record is not None:
+            return cmd_remove(client, config, args, record, input_fn=lambda prompt: input(prompt))
+        return cmd_clone(client, config, args)
+    except CloneError as e:
+        if environ.get("MARKLOGIC_DEBUG") == "1":
+            traceback.print_exc()
+        print(f"error: {e}", file=sys.stderr)
+        if e.hint:
+            print(f"hint: {e.hint}", file=sys.stderr)
+        return e.exit_code
+    except KeyboardInterrupt:
+        print("error: interrupted", file=sys.stderr)
+        return 130
+    except EOFError:
+        print("error: no answer to the confirmation prompt; nothing was deleted", file=sys.stderr)
+        return EXIT_DECLINED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

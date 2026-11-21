@@ -15,6 +15,7 @@ import pathlib
 import ssl
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.parse
 
@@ -660,6 +661,112 @@ class RemoveCommandTests(unittest.TestCase):
         ac.cmd_remove(self.fake, self.config, args, self.record, stdin=FakeStdin(True), out=io.StringIO(),
                       wait=lambda c, b: waits.append(b))
         self.assertEqual(waits, [RESTART_BODY])
+
+
+class MainTests(unittest.TestCase):
+    def run_main(self, argv, environ=ENV, fake=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ac.main(argv, environ=environ, client_factory=lambda config: fake or default_fake())
+        return code, out.getvalue(), err.getvalue()
+
+    def test_no_arguments_prints_help_and_exits_0(self):
+        code, out, _ = self.run_main([])
+        self.assertEqual(code, ac.EXIT_OK)
+        _, help_out, _ = self.run_main_help()
+        self.assertEqual(out, help_out)
+        for text in ("MARKLOGIC_PASS", "--remove", "--dry-run", "exit codes", "Admin UI"):
+            self.assertIn(text, out)
+
+    def run_main_help(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+            ac.main(["--help"], environ=ENV)
+        self.assertEqual(cm.exception.code, 0)
+        return 0, out.getvalue(), ""
+
+    def test_password_flag_rejected(self):
+        code, _, err = self.run_main(["App-Services", "--port", "9000", "--password", "x"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+        self.assertIn("unrecognized arguments", err)
+        self.assertIn("environment", err)
+
+    def test_abbreviations_disabled(self):
+        code, _, _ = self.run_main(["App-Services", "--po", "9000"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+
+    def test_clone_requires_port(self):
+        code, _, err = self.run_main(["App-Services"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+        self.assertIn("--port", err)
+
+    def test_invalid_port(self):
+        code, _, _ = self.run_main(["App-Services", "--port", "70000"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+
+    def test_remove_rejects_clone_options(self):
+        code, _, err = self.run_main(["--remove", "x.json", "--port", "9000"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+        self.assertIn("--port", err)
+
+    def test_yes_only_with_remove(self):
+        code, _, _ = self.run_main(["App-Services", "--port", "9000", "--yes"])
+        self.assertEqual(code, ac.EXIT_USAGE)
+
+    def test_missing_environment(self):
+        code, _, err = self.run_main(["App-Services", "--port", "9000", "--dry-run"], environ={})
+        self.assertEqual(code, ac.EXIT_USAGE)
+        self.assertIn("MARKLOGIC_HOST", err)
+
+    def test_remove_missing_record_explains_admin_ui_even_without_environment(self):
+        code, _, err = self.run_main(["--remove", "/nonexistent/x.json"], environ={})
+        self.assertEqual(code, ac.EXIT_PREFLIGHT)
+        self.assertIn("Admin UI", err)
+
+    def test_dry_run_end_to_end(self):
+        fake = default_fake()
+        with tempfile.TemporaryDirectory() as d:
+            code, out, _ = self.run_main(["App-Services", "--port", "9000", "--output", os.path.join(d, "r.json"),
+                                          "--dry-run"], fake=fake)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertIn("DRY RUN", out)
+        self.assertEqual(fake.mutating_calls(), [])
+
+    def test_api_error_maps_to_exit_3_without_traceback(self):
+        fake = default_fake()
+        fake.fail_post = ac.ApiError("POST", "/manage/v2/servers", 400, "ADMIN-PORTINUSE", "port in use")
+        with tempfile.TemporaryDirectory() as d:
+            code, _, err = self.run_main(["App-Services", "--port", "9000", "--output", os.path.join(d, "r.json")],
+                                         fake=fake)
+        self.assertEqual(code, ac.EXIT_API)
+        self.assertIn("error: POST /manage/v2/servers → 400 ADMIN-PORTINUSE", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_password_never_printed(self):
+        code, out, err = self.run_main(["App-Services", "--port", "9000", "--dry-run", "--output", "/nonexistent/d/r.json"])
+        self.assertNotIn("s3cret-pw", out + err)
+
+    def test_insecure_warning(self):
+        env = {**ENV, "MARKLOGIC_SCHEME": "https", "MARKLOGIC_INSECURE": "1"}
+        with tempfile.TemporaryDirectory() as d:
+            _, _, err = self.run_main(["App-Services", "--port", "9000", "--dry-run",
+                                       "--output", os.path.join(d, "r.json")], environ=env)
+        self.assertIn("certificate verification is disabled", err)
+
+    def test_eof_at_prompt_declines(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "AppServices-Digest.json")
+            ac.write_record(path, ac.build_record("ml1.example.com", "Default", "App-Services", CLONE_PROPS, now=NOW))
+            fake = FakeClient([("AppServices-Digest", "Default")], {("AppServices-Digest", "Default"): CLONE_PROPS})
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                    unittest.mock.patch("builtins.input", side_effect=EOFError), \
+                    unittest.mock.patch.object(ac.sys, "stdin", FakeStdin(True)):
+                code = ac.main(["--remove", path], environ=ENV, client_factory=lambda config: fake)
+            self.assertEqual(code, ac.EXIT_DECLINED)
+            self.assertIn("nothing was deleted", err.getvalue())
+            self.assertEqual(fake.mutating_calls(), [])
+            self.assertTrue(os.path.exists(path))
 
 
 if __name__ == "__main__":
