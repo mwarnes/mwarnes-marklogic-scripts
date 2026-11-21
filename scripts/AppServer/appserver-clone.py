@@ -403,17 +403,31 @@ def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_re
         print(json.dumps(payload, indent=2), file=out)
         return EXIT_OK
 
-    status, body = client.post_json("/manage/v2/servers", {"group-id": group}, payload)
-    if status == 202:
-        print("waiting for MarkLogic to restart...", file=out)
-        wait(client, body)
+    try:
+        status, body = client.post_json("/manage/v2/servers", {"group-id": group}, payload)
+    except TransportError as e:
+        e.hint = "the app server may or may not have been created; check the Admin UI before retrying"
+        raise
+    readback_error = None
+    try:
+        if status == 202:
+            print("waiting for MarkLogic to restart...", file=out)
+            wait(client, body)
+        properties = get_properties(client, name, group)
+    except CloneError as e:
+        readback_error = e
+        properties = payload
 
-    record = build_record(config.host, group, args.source, get_properties(client, name, group), now)
+    record = build_record(config.host, group, args.source, properties, now)
     try:
         write_record(output, record)
     except OSError as e:
         print(json.dumps(record, indent=2), file=out)
         raise CloneError(f"app server '{name}' WAS CREATED but the record could not be written to '{output}': {e}",
                          EXIT_API, hint="save the JSON printed above to a file; --remove needs it") from None
+    if readback_error is not None:
+        raise CloneError(f"app server '{name}' WAS CREATED but could not be read back ({readback_error}); "
+                         f"record written from the submitted settings to '{output}'", EXIT_API,
+                         hint="check the app server in the Admin UI; --remove can use this record")
     print(f"created app server '{name}' on port {args.port} in group '{group}'; record saved to {output}", file=out)
     return EXIT_OK

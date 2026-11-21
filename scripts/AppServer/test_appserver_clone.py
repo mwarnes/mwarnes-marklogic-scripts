@@ -522,6 +522,7 @@ class CloneCommandTests(unittest.TestCase):
         fake = default_fake()
         with self.assertRaises(ac.CloneError) as cm:
             self.run_clone(fake, port=8001)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
         self.assertIn("Admin", str(cm.exception))
         self.assertEqual(fake.mutating_calls(), [])
 
@@ -530,6 +531,29 @@ class CloneCommandTests(unittest.TestCase):
         fake.post_status, fake.restart_body = 202, RESTART_BODY
         self.run_clone(fake)
         self.assertEqual(self.waits, [RESTART_BODY])
+
+    def test_readback_failure_still_writes_record(self):
+        fake = default_fake()
+        original_get = fake.get_json
+        def flaky_get(path, params=None):
+            if path == "/manage/v2/servers/AppServices-Digest/properties":
+                raise ac.TransportError("timed out")
+            return original_get(path, params)
+        fake.get_json = flaky_get
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_clone(fake)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
+        self.assertIn("WAS CREATED", str(cm.exception))
+        self.assertTrue(os.path.exists(self.output))
+        self.assertEqual(ac.load_record(self.output)["clone"], {"name": "AppServices-Digest", "port": 9000})
+
+    def test_post_transport_error_hints_admin_ui(self):
+        fake = default_fake()
+        fake.fail_post = ac.TransportError("timed out")
+        with self.assertRaises(ac.TransportError) as cm:
+            self.run_clone(fake)
+        self.assertIn("may or may not have been created", cm.exception.hint)
+        self.assertFalse(os.path.exists(self.output))
 
     def test_record_write_failure_prints_record(self):
         fake = default_fake()
