@@ -1,8 +1,8 @@
 # Example: cloning an app server with `appserver-clone.py`
 
 This example clones the `App-Services` app server (port 8000) to a new app server called
-`AppServices-Digest` on port 9000. The output shown is the actual output of each command,
-captured on MarkLogic 12.1.0 on 2026-11-21.
+`AppServices-Digest` on port 9000, then removes the clone again. The output shown is the
+actual output of each command, captured on MarkLogic 12.1.0 on 2026-11-21.
 
 `appserver-clone.py` needs Python 3.8 or newer and nothing outside the Python standard library.
 
@@ -165,17 +165,47 @@ file:
 
 The record contains no credentials.
 
-## 5. Removing the clone later
+## 5. Removing the clone
+
+Removal uses only the record saved in step 4. Start with a dry run, which checks that the app
+server still exists with the recorded name, group and port, and shows what would be deleted:
 
 ```bash
-./appserver-clone.py --remove AppServices-Digest.json --dry-run   # show what would be deleted
-./appserver-clone.py --remove AppServices-Digest.json             # asks Delete ...? [y/N]
+./appserver-clone.py --remove AppServices-Digest.json --dry-run
+echo $?
 ```
 
-`--remove` checks that the app server still exists with the recorded name, group and port,
-asks for confirmation (`--yes` skips the question), deletes it, waits for MarkLogic to
-restart, and renames the record to `AppServices-Digest.json.removed`. Without the record file,
-the script refuses and tells you to delete the app server in the Admin UI instead.
+Output:
+
+```text
+will delete app server 'AppServices-Digest' (group 'Default', port 9000); MarkLogic restarts on the group's hosts afterwards
+DRY RUN: no changes made
+```
+
+Exit code: `0`
+
+Then remove it. Without `--yes` the script asks `Delete app server AppServices-Digest (group
+Default, port 9000)? [y/N]` before deleting. `--yes` skips the question (it is refused if
+`MARKLOGIC_HOST` differs from the host recorded in the file):
+
+```bash
+./appserver-clone.py --remove AppServices-Digest.json --yes
+echo $?
+```
+
+Output (about 10 seconds, most of it waiting for MarkLogic to restart):
+
+```text
+will delete app server 'AppServices-Digest' (group 'Default', port 9000); MarkLogic restarts on the group's hosts afterwards
+waiting for MarkLogic to restart...
+deleted app server 'AppServices-Digest' from group 'Default'; record renamed to AppServices-Digest.json.removed
+```
+
+Exit code: `0`
+
+The app server has been deleted, and the record has been renamed to
+`AppServices-Digest.json.removed` so it cannot be used a second time. Without a usable record
+file the script refuses and tells you to delete the app server in the Admin UI instead.
 
 ## Notes
 
