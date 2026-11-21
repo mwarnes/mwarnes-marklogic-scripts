@@ -143,10 +143,19 @@ No credentials are stored.
 
 ## Waiting for a restart
 
-Poll `GET /manage/v2?format=json` every 2 seconds. Connection errors and 503s while MarkLogic
-restarts are expected and are retried. The wait is complete when the API answers 200 and, for
-remove, the server's properties return 404. Timeout 180 s, then exit 3 with a message that the
-change was submitted but completion could not be confirmed.
+A 202 response carries `{"restart": {"last-startup": [{"host-id": ..., "value": ...}]}}`.
+For each host listed, poll `GET /manage/v2/hosts/{host-id}?view=status&format=json` every 2 seconds
+and read `host-status.status-properties.status-detail.last-startup.value`. A host has restarted once
+that value differs from the one in the 202 body. (`/admin/v1/timestamp` would also work, but it is
+only served on the Admin port, 8001. Verified on MarkLogic 12.1: the host status view on 8002 reports
+the same value.)
+
+If the 202 body has no restart details, wait one interval, then poll `GET /manage/v2?format=json`
+until it answers 200.
+
+Connection errors and 5xx responses during the restart are expected and are retried. Timeout 180 s,
+then exit 3 with a message that the change was submitted but completion could not be confirmed.
+After a remove, the script also checks that the server's properties now return 404.
 
 ## Internal structure
 
@@ -154,11 +163,12 @@ change was submitted but completion could not be confirmed.
 |---|---|
 | `load_config(environ)` | Check the environment variables and return a `Config` with an SSL context |
 | `ManageClient` | `get` / `post` / `delete` with digest auth; parse JSON; raise `ApiError(method, path, status, message_code, message)` from MarkLogic's `errorResponse` |
-| `resolve_group(client, name, group)` | Group lookup described above |
-| `ports_in_group(client, group)` | `{port: server_name}` |
+| `list_servers(client)` | `[(name, group), ...]` from the server list |
+| `resolve_group(servers, name, group)` | Pure: group lookup described above |
+| `ports_in_group(client, servers, group)` | `{port: server_name}` |
 | `plan_clone(source_props, name, port, existing_names, used_ports)` | Pure: checks plus payload |
-| `build_record`, `write_record`, `load_record` | Create, atomically write and check the JSON record |
-| `wait_for_restart(client, gone=None, timeout=180)` | Polling described above |
+| `build_record`, `check_output_path`, `write_record`, `load_record` | Create, check the target of, atomically write, and validate the JSON record |
+| `wait_for_restart(client, body, timeout=180)` | Polling described above |
 | `cmd_clone`, `cmd_remove` | Orchestrate the flows |
 | `main(argv)` | argparse, help when run with no arguments, map exceptions to exit codes |
 
