@@ -431,3 +431,59 @@ def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_re
                          hint="check the app server in the Admin UI; --remove can use this record")
     print(f"created app server '{name}' on port {args.port} in group '{group}'; record saved to {output}", file=out)
     return EXIT_OK
+
+
+def cmd_remove(client, config: Config, args, record: dict, stdin=None, input_fn=input, out=None,
+               wait=wait_for_restart) -> int:
+    out = out or sys.stdout
+    stdin = stdin or sys.stdin
+    group, name, port = record["group"], record["clone"]["name"], record["clone"]["port"]
+
+    if record.get("marklogic-host") != config.host:
+        print(f"warning: record was created via host '{record.get('marklogic-host')}', "
+              f"MARKLOGIC_HOST is '{config.host}'; continuing because name, group and port are checked",
+              file=out)
+    try:
+        current = get_properties(client, name, group)
+    except ApiError as e:
+        if e.status == 404:
+            print(f"app server '{name}' no longer exists in group '{group}'; nothing to remove", file=out)
+            return EXIT_OK
+        raise
+    if current.get("port") != port:
+        raise CloneError(f"app server '{name}' now listens on port {current.get('port')}, but the record says {port}; "
+                         "refusing to delete", EXIT_PREFLIGHT,
+                         hint="it may have been changed or recreated; if you are sure, remove it in the Admin UI")
+
+    print(f"will delete app server '{name}' (group '{group}', port {port}); "
+          "MarkLogic restarts on the group's hosts afterwards", file=out)
+    if args.dry_run:
+        print("DRY RUN: no changes made", file=out)
+        return EXIT_OK
+    if not args.yes:
+        if not stdin.isatty():
+            raise CloneError("refusing to delete without confirmation: no terminal to prompt on", EXIT_DECLINED,
+                             hint="re-run with --yes to confirm")
+        answer = input_fn(f"Delete app server {name} (group {group}, port {port})? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("not deleted", file=out)
+            return EXIT_DECLINED
+
+    status, body = client.delete(server_path(name), {"group-id": group})
+    if status == 202:
+        print("waiting for MarkLogic to restart...", file=out)
+        wait(client, body)
+    try:
+        get_properties(client, name, group)
+    except ApiError as e:
+        if e.status != 404:
+            raise
+    else:
+        raise CloneError(f"DELETE returned {status} but app server '{name}' still exists", EXIT_API)
+
+    removed = args.remove + ".removed"
+    if os.path.exists(removed):
+        removed += "." + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    os.replace(args.remove, removed)
+    print(f"deleted app server '{name}' from group '{group}'; record renamed to {removed}", file=out)
+    return EXIT_OK

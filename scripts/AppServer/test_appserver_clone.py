@@ -571,5 +571,96 @@ class CloneCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(printed[printed.index("{"):])["clone"]["name"], "AppServices-Digest")
 
 
+class FakeStdin:
+    def __init__(self, tty):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+class RemoveCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.config = ac.load_config(ENV)
+        self.path = os.path.join(self.dir.name, "AppServices-Digest.json")
+        ac.write_record(self.path, ac.build_record("ml1.example.com", "Default", "App-Services", CLONE_PROPS, now=NOW))
+        self.record = ac.load_record(self.path)
+        self.fake = FakeClient([("App-Services", "Default"), ("AppServices-Digest", "Default")],
+                               {("App-Services", "Default"): SOURCE_PROPS,
+                                ("AppServices-Digest", "Default"): CLONE_PROPS})
+
+    def run_remove(self, yes=False, dry_run=False, tty=True, answer="y", config=None):
+        out = io.StringIO()
+        args = argparse.Namespace(remove=self.path, yes=yes, dry_run=dry_run)
+        code = ac.cmd_remove(self.fake, config or self.config, args, self.record, stdin=FakeStdin(tty),
+                             input_fn=lambda prompt: answer, out=out, wait=lambda c, b: None)
+        return code, out.getvalue()
+
+    def test_remove_with_yes_deletes_and_renames_record(self):
+        code, out = self.run_remove(yes=True)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertEqual(self.fake.mutating_calls(),
+                         [("DELETE", "/manage/v2/servers/AppServices-Digest", {"group-id": "Default"})])
+        self.assertFalse(os.path.exists(self.path))
+        self.assertTrue(os.path.exists(self.path + ".removed"))
+        self.assertIn("deleted app server 'AppServices-Digest'", out)
+
+    def test_prompt_yes_deletes(self):
+        code, _ = self.run_remove(answer="y")
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertEqual(len(self.fake.mutating_calls()), 1)
+
+    def test_prompt_no_declines(self):
+        code, _ = self.run_remove(answer="")
+        self.assertEqual(code, ac.EXIT_DECLINED)
+        self.assertEqual(self.fake.mutating_calls(), [])
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_no_tty_without_yes_refuses(self):
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_remove(tty=False)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_DECLINED)
+        self.assertIn("--yes", cm.exception.hint)
+        self.assertEqual(self.fake.mutating_calls(), [])
+
+    def test_dry_run_changes_nothing(self):
+        code, out = self.run_remove(dry_run=True, yes=True)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertEqual(self.fake.mutating_calls(), [])
+        self.assertTrue(os.path.exists(self.path))
+        self.assertIn("DRY RUN", out)
+
+    def test_already_removed(self):
+        del self.fake.props[("AppServices-Digest", "Default")]
+        code, out = self.run_remove(yes=True)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertIn("nothing to remove", out)
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_port_mismatch_refuses(self):
+        self.fake.props[("AppServices-Digest", "Default")]["port"] = 9100
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_remove(yes=True)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertIn("9100", str(cm.exception))
+        self.assertEqual(self.fake.mutating_calls(), [])
+
+    def test_host_mismatch_warns_but_continues(self):
+        other = ac.load_config({**ENV, "MARKLOGIC_HOST": "ml-alias.example.com"})
+        code, out = self.run_remove(yes=True, config=other)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertIn("warning", out)
+
+    def test_restart_is_waited_for(self):
+        self.fake.delete_status, self.fake.restart_body = 202, RESTART_BODY
+        waits = []
+        args = argparse.Namespace(remove=self.path, yes=True, dry_run=False)
+        ac.cmd_remove(self.fake, self.config, args, self.record, stdin=FakeStdin(True), out=io.StringIO(),
+                      wait=lambda c, b: waits.append(b))
+        self.assertEqual(waits, [RESTART_BODY])
+
+
 if __name__ == "__main__":
     unittest.main()
