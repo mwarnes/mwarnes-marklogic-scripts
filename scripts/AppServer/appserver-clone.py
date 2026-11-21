@@ -381,3 +381,39 @@ def wait_for_restart(client, body, timeout: float = 180, interval: float = 2,
             raise CloneError(f"MarkLogic did not finish restarting within {int(timeout)}s", EXIT_API,
                              hint="the change was submitted; check the Admin UI before trying again")
         sleep(interval)
+
+
+def cmd_clone(client, config: Config, args, out=None, now=None, wait=wait_for_restart) -> int:
+    out = out or sys.stdout
+    name = args.name or default_clone_name(args.source, args.port)
+    output = args.output or f"{name}.json"
+    check_output_path(output)
+
+    servers = list_servers(client)
+    group = resolve_group(servers, args.source, args.group)
+    source_props = get_properties(client, args.source, group)
+    existing = {n for n, g in servers if g == group}
+    payload = plan_clone(source_props, name, args.port, existing, ports_in_group(client, servers, group))
+
+    print(f"source:  {args.source} (group '{group}', port {source_props.get('port')})", file=out)
+    print(f"clone:   {name} (group '{group}', port {args.port})", file=out)
+    print(f"record:  {output}", file=out)
+    if args.dry_run:
+        print("DRY RUN: no changes made. Payload that would be sent to POST /manage/v2/servers:", file=out)
+        print(json.dumps(payload, indent=2), file=out)
+        return EXIT_OK
+
+    status, body = client.post_json("/manage/v2/servers", {"group-id": group}, payload)
+    if status == 202:
+        print("waiting for MarkLogic to restart...", file=out)
+        wait(client, body)
+
+    record = build_record(config.host, group, args.source, get_properties(client, name, group), now)
+    try:
+        write_record(output, record)
+    except OSError as e:
+        print(json.dumps(record, indent=2), file=out)
+        raise CloneError(f"app server '{name}' WAS CREATED but the record could not be written to '{output}': {e}",
+                         EXIT_API, hint="save the JSON printed above to a file; --remove needs it") from None
+    print(f"created app server '{name}' on port {args.port} in group '{group}'; record saved to {output}", file=out)
+    return EXIT_OK

@@ -458,5 +458,94 @@ class WaitForRestartTests(unittest.TestCase):
         self.assertGreaterEqual(clock.now, 2)  # waited at least one interval before the first poll
 
 
+def clone_args(**overrides):
+    values = dict(source="App-Services", port=9000, name="AppServices-Digest", group=None, output=None, dry_run=False)
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class CloneCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.config = ac.load_config(ENV)
+        self.output = os.path.join(self.dir.name, "AppServices-Digest.json")
+
+    def run_clone(self, fake, **overrides):
+        overrides.setdefault("output", self.output)
+        self.waits = getattr(self, "waits", [])
+        out = io.StringIO()
+        code = ac.cmd_clone(fake, self.config, clone_args(**overrides), out=out, now=NOW,
+                            wait=lambda client, body: self.waits.append(body))
+        return code, out.getvalue()
+
+    def test_clone_posts_payload_and_writes_record(self):
+        fake = default_fake()
+        code, out = self.run_clone(fake)
+        self.assertEqual(code, ac.EXIT_OK)
+        (method, path, params, body), = fake.mutating_calls()
+        self.assertEqual((method, path, params), ("POST", "/manage/v2/servers", {"group-id": "Default"}))
+        self.assertEqual(body, dict(SOURCE_PROPS, **{"server-name": "AppServices-Digest", "port": 9000}))
+        record = ac.load_record(self.output)
+        self.assertEqual(record["clone"], {"name": "AppServices-Digest", "port": 9000})
+        self.assertEqual(record["source"], "App-Services")
+        self.assertEqual(record["marklogic-host"], "ml1.example.com")
+        self.assertIn("created app server 'AppServices-Digest'", out)
+
+    def test_default_name_and_output(self):
+        fake = default_fake()
+        cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        self.addCleanup(os.chdir, cwd)
+        code, _ = self.run_clone(fake, name=None, output=None, port=8050)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertTrue(os.path.exists(os.path.join(self.dir.name, "App-Services-8050.json")))
+
+    def test_dry_run_changes_nothing(self):
+        fake = default_fake()
+        code, out = self.run_clone(fake, dry_run=True)
+        self.assertEqual(code, ac.EXIT_OK)
+        self.assertEqual(fake.mutating_calls(), [])
+        self.assertFalse(os.path.exists(self.output))
+        self.assertIn("DRY RUN", out)
+        self.assertIn('"server-name": "AppServices-Digest"', out)
+
+    def test_existing_output_fails_before_any_api_call(self):
+        pathlib.Path(self.output).write_text("{}")
+        fake = default_fake()
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_clone(fake)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_PREFLIGHT)
+        self.assertEqual(fake.calls, [])
+
+    def test_port_in_use_fails_without_post(self):
+        fake = default_fake()
+        with self.assertRaises(ac.CloneError) as cm:
+            self.run_clone(fake, port=8001)
+        self.assertIn("Admin", str(cm.exception))
+        self.assertEqual(fake.mutating_calls(), [])
+
+    def test_restart_is_waited_for(self):
+        fake = default_fake()
+        fake.post_status, fake.restart_body = 202, RESTART_BODY
+        self.run_clone(fake)
+        self.assertEqual(self.waits, [RESTART_BODY])
+
+    def test_record_write_failure_prints_record(self):
+        fake = default_fake()
+        original = ac.write_record
+        def broken(path, record):
+            raise OSError(28, "No space left on device")
+        ac.write_record = broken
+        self.addCleanup(setattr, ac, "write_record", original)
+        out = io.StringIO()
+        with self.assertRaises(ac.CloneError) as cm:
+            ac.cmd_clone(fake, self.config, clone_args(output=self.output), out=out, now=NOW, wait=lambda c, b: None)
+        self.assertEqual(cm.exception.exit_code, ac.EXIT_API)
+        self.assertIn("WAS CREATED", str(cm.exception))
+        printed = out.getvalue()
+        self.assertEqual(json.loads(printed[printed.index("{"):])["clone"]["name"], "AppServices-Digest")
+
+
 if __name__ == "__main__":
     unittest.main()
