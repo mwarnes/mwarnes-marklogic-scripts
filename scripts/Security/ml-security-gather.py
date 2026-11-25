@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Collect and sanity-check the security configuration of a MarkLogic cluster for a support case.
 
-  ml-security-gather.py AREA [options]        AREA is one of: saml, oauth, ldap, https, certificate
-  ml-security-gather.py AREA --help           the options and examples of one area
+  ./ml-security-gather.py AREA [options]      AREA is one of: saml, oauth, ldap, https, certificate
+  ./ml-security-gather.py AREA --help         the options and examples of one area
 
 Areas
   saml    SAML external security profile: settings, IdP certificate, IdP metadata, captured SAML response, role mapping
   oauth   OAuth external security profile (Resource server; Authorization code on MarkLogic 12): settings, IdP discovery
-          document and JWKS, IdP TLS chain and trust, captured access token (signature, issuer, claims)
+          document and JWKS, IdP TLS chain and trust-store evidence, captured access token (signature, issuer, claims)
   ldap    LDAP external security profile: settings, certificates, TLS of the directory server, user/role external names
   https   HTTPS app server: TLS settings, certificate template, the certificate chain the port really serves, protocols
   certificate   client certificate authentication: selected client CAs, issuer verification, the client certificate, DN to user mapping
@@ -21,15 +21,15 @@ that would add it.
   export MARKLOGIC_PASS='...'      # the password is never taken from the command line
                                    # (if it is not set and a terminal is attached, the script asks for it)
 
-Output: ./<area>-gather-<timestamp>/ with SUMMARY.md, the raw JSON of each call and a .zip of it. Review SUMMARY.md
-before sending; it contains host names, entity IDs, certificate details and user names. Passwords, private keys and
-client secrets are removed before anything is written. Nothing is changed on the server.
+Output: ./<area>-gather-<timestamp>/ with SUMMARY.md, redacted JSON and filtered logs; the .zip is created alongside it.
+The output directory must be new or empty. Known credential fields and token forms are redacted, but this is not a guarantee:
+review every file in the archive before sharing it. Nothing is changed on the server.
 
 Examples
-  ml-security-gather.py saml  --host ml1.example.com --user admin --external-security <profile>
-  ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> --token token.txt --logs
-  ml-security-gather.py ldap  --host ml1.example.com --user admin --external-security <profile> --user-name <user>
-  ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server name>
+  ./ml-security-gather.py saml  --host ml1.example.com --user admin --external-security <profile>
+  ./ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> --token token.txt --logs
+  ./ml-security-gather.py ldap  --host ml1.example.com --user admin --external-security <profile> --user-name <user>
+  ./ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server name>
 """
 
 import argparse
@@ -48,7 +48,17 @@ import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 
-SECRET_KEY_RE = re.compile(r"(private-key|password|secret|passphrase)", re.I)
+SECRET_KEY_RE = re.compile(
+    r"(private[-_]?key|password|secret|passphrase|(?:access|refresh|id)[-_]?token|client[-_]?assertion|"
+    r"code[-_]?verifier|samlrequest|samlresponse|relaystate)",
+    re.I,
+)
+SECRET_FIELD_RE = (
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[\s_-]?secret|client[_-]?assertion|"
+    r"code[_-]?verifier|device[_-]?code|user[_-]?code|assertion|password|passphrase|private[_-]?key|"
+    r"samlresponse|samlrequest|relaystate|state|nonce|token|cookie)"
+)
+FORM_SECRET_FIELD_RE = r"(?:" + SECRET_FIELD_RE + r"|code)"
 PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
 PRIV_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -63,7 +73,7 @@ CHECKS = []   # (result, name, detail)
 
 # ---------------------------------------------------------------- helpers
 def say(line=""):
-    REPORT.append(line)
+    REPORT.append(scrub(str(line)))
 
 
 def missing(what, why, how):
@@ -125,11 +135,13 @@ def list_names(data):
 
 def redact(obj):
     if isinstance(obj, dict):
-        return {k: ("<removed>" if SECRET_KEY_RE.search(k) else redact(v)) for k, v in obj.items()}
+        sensitive = {"token", "state", "nonce", "cookie", "device_code", "user_code"}
+        return {k: ("<removed>" if SECRET_KEY_RE.search(k) or str(k).casefold() in sensitive else redact(v))
+                for k, v in obj.items()}
     if isinstance(obj, list):
         return [redact(x) for x in obj]
     if isinstance(obj, str):
-        return PRIV_RE.sub("<private key removed>", obj)
+        return scrub(obj)
     return obj
 
 
@@ -154,10 +166,10 @@ class Api:
         r = subprocess.run(cmd, input='user = "%s:%s"\n' % (esc(a.user), esc(self.password)),
                            capture_output=True, text=True)
         if r.returncode != 0:
-            return None, "curl error %d: %s" % (r.returncode, r.stderr.strip())
+            return None, "curl error %d: %s" % (r.returncode, scrub(r.stderr.strip()))
         body, _, code = r.stdout.rpartition("\n")
         if code != "200":
-            return None, "HTTP %s: %s" % (code, body[:200].replace("\n", " "))
+            return None, "HTTP %s: %s" % (code, scrub(body[:200].replace("\n", " ")))
         if text:
             return body, None
         try:
@@ -373,12 +385,13 @@ def load_metadata(src, a):
             cmd.append("-k")
         r = subprocess.run(cmd + [src], capture_output=True, text=True)
         if r.returncode != 0:
-            return None, "could not download metadata: " + r.stderr.strip()
-        return r.stdout, None
+            return None, "could not download metadata: " + scrub(r.stderr.strip()), False
+        authenticated = urllib.parse.urlsplit(src).scheme.lower() == "https" and not a.metadata_insecure
+        return r.stdout, None, authenticated
     try:
-        return open(src, encoding="utf-8", errors="replace").read(), None
+        return open(src, encoding="utf-8", errors="replace").read(), None, True
     except OSError as e:
-        return None, str(e)
+        return None, scrub(str(e)), False
 
 
 def sha1_of_b64(b64):
@@ -509,13 +522,59 @@ HINTS = [
 
 
 def scrub(line):
+    original = str(line)
+    line = PRIV_RE.sub("<private key removed>", original)
+    line = re.sub(
+        r"(?is)<[^>]*\b(?:name|id)\s*=\s*[\"']?(?:" + SECRET_FIELD_RE + r")[\"']?[^>]*>",
+        "<sensitive form field removed>",
+        line,
+    )
+    line = re.sub(
+        r"(?is)<(?:[\w.-]+:)?(?:Assertion|Response)\b.*?</(?:[\w.-]+:)?(?:Assertion|Response)\s*>",
+        "<SAML assertion or response removed>",
+        line,
+    )
+    line = re.sub(r"(?i)((?:Proxy-)?Authorization\s*:\s*)[^\s,;\"']+", r"\1<removed>", line)
+    line = re.sub(r"(?i)((?:Set-Cookie|Cookie)\s*:\s*)[^\r\n]+", r"\1<removed>", line)
+    line = re.sub(
+        r"(?is)(<(?P<tag>(?:[\w.-]+:)?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|"
+        r"client[_-]?secret|client[_-]?assertion|code[_-]?verifier|assertion|password|passphrase|"
+        r"private[_-]?key|samlresponse|samlrequest|relaystate))\b[^>]*>).*?(</(?P=tag)\s*>)",
+        r"\1<removed>\3",
+        line,
+    )
+    line = re.sub(
+        r"(?:eyJ[\w-]+|<\d+ chars removed>)\.(?:eyJ[\w-]+|<\d+ chars removed>)\."
+        r"(?:[\w-]+|<\d+ chars removed>)",
+        "<JWT removed>",
+        line,
+    )
+    line = re.sub(
+        r"(?is)([\"']?" + SECRET_FIELD_RE + r"[\"']?\s*:\s*)(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^,\s}\]]+)",
+        r"\1<removed>",
+        line,
+    )
+    line = re.sub(
+        r"(?i)(?<![\w-])(" + FORM_SECRET_FIELD_RE + r")\s*(=|%3[dD])\s*([^&\s,;}\]\"'<>]+)",
+        r"\1\2<removed>",
+        line,
+    )
+    line = re.sub(r"(?i)(\bBearer\s+)[^\s,;\"']+", r"\1<removed>", line)
     line = re.sub(r"((?:SAMLRequest|SAMLResponse|Signature|RelayState)=)[^&\s]+", r"\1<removed>", line)
     line = re.sub(r"(<(?:ds:)?(?:SignatureValue|DigestValue|X509Certificate)>)[^<]*", r"\1<removed>", line)
-    # one-time codes and secrets of a token-endpoint request (the OAuth Communications trace logs its form data)
-    line = re.sub(r"(?<![\w-])((?:code|code_verifier|client_secret|client_assertion|assertion|refresh_token|password)=)[^&\s]+", r"\1<removed>", line)
-    # whole tokens: a JWT (header.payload.signature), and the token values of a token-endpoint response
-    line = re.sub(r"eyJ[\w-]+\.eyJ[\w-]+\.[\w-]*", "<JWT removed>", line)
-    line = re.sub(r'("(?:access_token|refresh_token|id_token)"\s*:\s*")[^"]*', r"\1<removed>", line)
+    # Encoded field names or JSON are uncommon in logs; redact the whole string if decoding exposes a credential field.
+    field_label = r"(?<![\w-])[\"']?(" + SECRET_FIELD_RE + r")[\"']?"
+    for raw_line in original.splitlines():
+        decoded = raw_line
+        raw_fields = set(re.findall(r"(?i)" + field_label + r"\s*(?:=|:|%3[dD]|%3[aA])", raw_line))
+        for _ in range(2):
+            previous = decoded
+            decoded = urllib.parse.unquote(previous)
+            if decoded == previous:
+                break
+            decoded_fields = set(re.findall(r"(?i)" + field_label + r"\s*(?:=|:)", decoded))
+            if decoded_fields - raw_fields:
+                return "<redacted encoded content>"
     line = re.sub(r"[A-Za-z0-9+/=%]{120,}", lambda m: "<%d chars removed>" % len(m.group(0)), line)
     return re.sub(r"(?:<JWT removed>|<\d+ chars removed>)\.<\d+ chars removed>\.[\w-]+", "<JWT removed>", line)
 
@@ -525,24 +584,32 @@ def load_role_map(api, out, errors):
     data, err = api.get("/manage/v2/roles?format=json")
     if err:
         errors.append("/manage/v2/roles: " + err)
+        missing("Role external-name mapping", "the role list could not be read", "resolve the Management API error and gather again")
         return None
     names = list_names(data)
     if len(names) > 1500:
-        errors.append("roles: %d roles, only the first 1500 were read" % len(names))
-        names = names[:1500]
+        missing("Role external-name mapping", "the cluster has more than 1500 roles; mapping was not checked", "reduce the role count or use a smaller test cluster")
+        return None
     rmap = {}
 
     def read_role(n):
         rp, err = api.get("/manage/v2/roles/%s/properties?format=json" % q(n))
-        return n, ([] if err else [str(x) for x in find_all(rp, "external-name")])
+        return n, ([] if err else [str(x) for x in find_all(rp, "external-name")]), err
 
-    # one curl per role: read them in parallel (a cluster can have hundreds of roles)
+    failures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
-        for n, ens in pool.map(read_role, names):
+        for n, ens, err in pool.map(read_role, names):
+            if err:
+                errors.append("/manage/v2/roles/%s/properties: %s" % (q(n), err))
+                failures.append(n)
             for en in ens:
                 rmap.setdefault(en, []).append(n)
+    if failures:
+        missing("Role external-name mapping", "%d role properties could not be read; mapping is incomplete" % len(failures),
+                "resolve the Management API errors and gather again")
+        return None
     with open(os.path.join(out, "roles-external-names.json"), "w") as f:
-        json.dump(rmap, f, indent=2)
+        json.dump(redact(rmap), f, indent=2)
     return rmap
 
 
@@ -604,7 +671,7 @@ def analyse_logs(a, api, out, cfgs, bound, hostnames, role_map, errors):
         say("- Trace events, group `%s`: mechanism %s, events: %s" % (grp, "ON" if on else "off", ", ".join(ev) or "none"))
         if not (on and "SAML" in ev):
             check("WARN", "SAML trace events enabled on group %s" % grp,
-                  "off: the ErrorLog will not show why a login is rejected. Run ml-trace-events.py enable --preset saml, reproduce, then gather again")
+                  "off: the ErrorLog will not show why a login is rejected. Run ./ml-trace-events.py enable --preset saml, reproduce, then gather again")
     say("")
     all_msgs, resp_rows, mapped_rows, status_counts, bad_lines = [], [], [], {}, []
     for h in hostnames:
@@ -776,7 +843,7 @@ class Parser(argparse.ArgumentParser):
 
     def error(self, message):
         self.print_help(sys.stderr)
-        sys.stderr.write("\nERROR: %s\n" % message)
+        sys.stderr.write("\nERROR: %s\n" % scrub(str(message)))
         sys.exit(2)
 
 
@@ -793,8 +860,8 @@ def explain_connection_failure(a, err):
                      "Use --cacert <ca.pem> (or --insecure for a one-off test), or --scheme http if the port is not TLS.")
     else:
         hints.append("Check --host, --port and --scheme, and that the Management API is reachable from this machine.")
-    sys.stderr.write("ERROR: could not read %s://%s:%s/manage/v2 (%s)\n%s\nRun with --help for all options.\n" % (
-        a.scheme, a.host, a.port, err, "\n".join(hints)))
+    sys.stderr.write(scrub("ERROR: could not read %s://%s:%s/manage/v2 (%s)\n%s\nRun with --help for all options.\n" % (
+        a.scheme, a.host, a.port, err, "\n".join(hints))))
     sys.exit(1)
 
 
@@ -824,7 +891,11 @@ def setup(a, p, area):
     if err:
         explain_connection_failure(a, err)
     out = a.out or "%s-gather-%s" % (area, NOW.strftime("%Y%m%d-%H%M%S"))
-    os.makedirs(out, exist_ok=True)
+    if os.path.exists(out):
+        if not os.path.isdir(out) or os.listdir(out):
+            p.error("output path already exists and is not empty; choose a new or empty --out directory")
+    else:
+        os.makedirs(out)
     c = Ctx()
     c.a, c.api, c.out, c.area, c.errors = a, api, out, area, []
 
@@ -1261,18 +1332,28 @@ def dn_cn(dn):
     return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
 
 
-def ml_trust_of_chain(c, ders):
-    """Which certificate of a chain is in MarkLogic's trusted CA list (by key identifier or name)?"""
+def ml_trust_store_evidence(c, ders):
+    """Find identifier/name correspondences, not whether MarkLogic will trust a presented chain."""
     cas = load_trusted_cas(c)
+    evidence = []
     for n, der in enumerate(ders):
         info = cert_info(der)
         for cn, ski, na in cas:
-            if (info.get("ski") and info["ski"] == ski) or (cn and dn_cn(info.get("subject")) == cn):
-                return cn
-            # the last certificate sent is often issued by a root that is not sent: check its issuer too
-            if n == len(ders) - 1 and ((info.get("aki") and info["aki"] == ski) or (cn and dn_cn(info.get("issuer")) == cn)):
-                return cn + " (the issuer of the last certificate sent)"
-    return None
+            if info.get("ski") and info["ski"] == ski:
+                evidence.append("certificate #%d subject key identifier matches a stored CA entry `%s`" % (n + 1, cn))
+            elif n == len(ders) - 1 and info.get("aki") and info["aki"] == ski:
+                evidence.append("last certificate's authority key identifier matches a stored CA entry `%s`" % cn)
+            elif cn and dn_cn(info.get("subject")) == cn:
+                if info.get("ski") and ski and info["ski"] != ski:
+                    evidence.append("certificate #%d has the same common name as `%s`, but different subject key identifiers" % (n + 1, cn))
+                else:
+                    evidence.append("certificate #%d has the same common name as stored CA entry `%s`" % (n + 1, cn))
+            elif n == len(ders) - 1 and cn and dn_cn(info.get("issuer")) == cn:
+                if info.get("aki") and ski and info["aki"] != ski:
+                    evidence.append("last certificate has issuer common name `%s`, but its authority key identifier differs from the stored CA entry" % cn)
+                else:
+                    evidence.append("last certificate has issuer common name `%s`, matching a stored CA entry" % cn)
+    return "; ".join(dict.fromkeys(evidence)) or None
 
 
 def analyse_tls_chain(c, label, probe, host, check_ml_trust=False):
@@ -1294,13 +1375,10 @@ def analyse_tls_chain(c, label, probe, host, check_ml_trust=False):
         check("PASS" if code == 0 else "WARN", "%s trusted by this machine" % label,
               "verification result: %s (%s). This is this machine's trust store, not MarkLogic's" % (code, probe.get("verify_msg")))
     if check_ml_trust and ders:
-        hit = ml_trust_of_chain(c, ders)
-        if hit:
-            check("PASS", "%s chain is trusted by MarkLogic" % label, "found in MarkLogic's certificate authorities: %s" % hit)
-        else:
-            check("WARN", "%s chain is trusted by MarkLogic" % label,
-                  "no certificate of the chain is in MarkLogic's trusted certificate authorities (Admin Interface > Security > Certificate Authorities); "
-                  "MarkLogic cannot verify this server's certificate unless the CA is added")
+        evidence = ml_trust_store_evidence(c, ders)
+        detail = ("Possible store correspondence: %s. " % evidence) if evidence else "No name/key-identifier correspondence was found. "
+        check("INFO", "%s MarkLogic trust status not verified" % label,
+              detail + "The Management API does not provide the trusted CA certificate bytes here, so this check cannot validate the path, signatures, validity, CA constraints, or MarkLogic's actual connection behavior.")
     if probe.get("protocol"):
         say("- Negotiated: %s, cipher %s" % (probe["protocol"], probe.get("cipher")))
         say("")
@@ -1311,7 +1389,7 @@ def analyse_tls_chain(c, label, probe, host, check_ml_trust=False):
 OAUTH_HINTS = [
     (r"Response code: [45]\d\d Response: <", "The IdP answered a request of MarkLogic with an HTML page, not JSON: the URL is not the IdP's token endpoint (or the endpoint refused the request). Compare `oauth-token-server-uri` with the discovery document (the report lists both)."),
     (r"JWT client id validation fails", "`oauth-client-id` of the profile is not the client id in the token (its `aud` or `azp`): MarkLogic checks it. Set `oauth-client-id` to the client id of the IdP application that issued the token."),
-    (r"token expiration", "MarkLogic reports signature, format and expiration with one message. If the signature check of `--token` passes, the usual cause is an expired token: compare the token's `exp` with the time of the request (MarkLogic tolerates a clock skew of several minutes), and request a new token."),
+    (r"token expiration", "MarkLogic reports a token validation failure. Compare `exp` with the request time only when the host time zone and applicable clock tolerance are known; this message alone does not establish whether the signature or expiry check failed."),
     (r"invalid json", "The JWKS URI did not return a key set (a JSON document with a `keys` list): check `oauth-jwks-uri`; the report reads it from this machine and says what it answers."),
     (r"OAuth Error: 'invalid_request'", "The IdP refused the authorization request and sent the browser back with this error. In authentik the usual cause is that the provider does not allow the `authorization_code` grant type (the IdP's own log says `Invalid grant_type for provider`)."),
     (r"OAuth Error: 'invalid_client'|invalid_client", "The IdP does not accept the client id / client secret / authentication method that MarkLogic sent to the token endpoint."),
@@ -1414,7 +1492,7 @@ def analyse_logs_generic(c, area, bound):
             say("- Trace events, group `%s`: mechanism %s, events: %s" % (grp, "ON" if on else "off", ", ".join(ev) or "none"))
             if not (on and cfgl["trace_event"] in ev):
                 check("WARN", "%s trace events enabled on group %s" % (area.upper(), grp),
-                      "off: the ErrorLog will not show why a login is rejected. Run ml-trace-events.py enable --preset %s, reproduce, then gather again" % cfgl["preset"])
+                      "off: the ErrorLog will not show why a login is rejected. Run ./ml-trace-events.py enable --preset %s, reproduce, then gather again" % cfgl["preset"])
         say("")
     all_msgs = []
     for h in c.hostnames:
@@ -1467,18 +1545,11 @@ def analyse_logs_generic(c, area, bound):
             check("FAIL", "MarkLogic fetched an HTML page instead of the JWKS",
                   "the trace line `JWKS Response:` holds an HTML page, not a key set (a JSON document with a `keys` list): the URL in `oauth-jwks-uri` is not the IdP's JWKS endpoint (or it refused the request). "
                   "The login ends in HTTP 500 although the token request before it succeeded. Compare `oauth-jwks-uri` with the discovery document (the report lists both and reads the URL from this machine)")
-        if area == "oauth" and OAUTH_CTX.get("token_exp"):
-            for h, ts, level, b in all_msgs:
-                if "token expiration" in b or "JWT verification failed" in b:
-                    try:
-                        when = dt.datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
-                    except ValueError:
-                        break
-                    if OAUTH_CTX["token_exp"] < when:
-                        check("FAIL", "the token was expired when it was used",
-                              "its `exp` is %d s before the failed request at %s (log time read as UTC; MarkLogic tolerates a clock skew of several minutes, so a smaller difference would be accepted). "
-                              "MarkLogic reports signature, format and expiration with one message: this token's signature checks out, so request a new token" % (when - OAUTH_CTX["token_exp"], ts[:19]))
-                    break
+        if area == "oauth" and OAUTH_CTX.get("token_exp") and any(
+                "token expiration" in b or "JWT verification failed" in b for _, _, _, b in all_msgs):
+            check("INFO", "token expiry was not attributed to the log failure",
+                  "ErrorLog timestamps use each host's local time zone, and MarkLogic's combined validation message does not establish whether signature or expiry validation failed. "
+                  "Compare `exp` with the request time only when the host time zone and applicable clock tolerance are known.")
         for msg, times in list(grouped.items())[:15]:
             hint = next((t for pat, t in cfgl["hints"] if re.search(pat, msg)), None)
             check("WARN" if levels[msg] == "Warning" else "FAIL", "%s %s, first at %s (%d time%s)" % (area.upper(), "warning" if levels[msg] == "Warning" else "error", times[0], len(times), "" if len(times) == 1 else "s"),
@@ -1498,8 +1569,8 @@ def analyse_logs_generic(c, area, bound):
                           "The IdP does not put the claim in the token: for the authorization code flow check the scopes the profile requests and the IdP's scope or property mapping" % attr)
                     continue
                 vals = [v.strip() for v in roles.split(",") if v.strip()]
-                lower = {k.lower(): (k, v) for k, v in OAUTH_CTX["role_map"].items()}
-                hit = {v: lower[v.lower()] for v in vals if v.lower() in lower}
+                lower = {k.casefold(): (k, v) for k, v in OAUTH_CTX["role_map"].items()}
+                hit = {v: lower[v.casefold()] for v in vals if v.casefold() in lower}
                 if hit:
                     check("PASS", "role claim values of %s map to MarkLogic roles" % user,
                           "; ".join("`%s` -> %s" % (v, ", ".join(r)) for v, (k, r) in hit.items()))
@@ -1569,10 +1640,8 @@ def b64url(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def curl_json(url, insecure=False, timeout=25):
+def curl_json(url, timeout=25):
     cmd = ["curl", "-sSL", "--max-time", str(timeout), "-w", "\n%{http_code}"]
-    if insecure:
-        cmd.append("-k")
     r = subprocess.run(cmd + [url], capture_output=True, text=True)
     if r.returncode != 0:
         return None, "curl error %d: %s" % (r.returncode, r.stderr.strip()[:140]), r.returncode
@@ -1586,13 +1655,20 @@ def curl_json(url, insecure=False, timeout=25):
 
 
 def get_json_probe(url):
-    """Fetch a JSON document; if only the TLS trust fails, retry without verification and say so."""
-    d, err, rc = curl_json(url)
-    if d is None and rc in (35, 51, 58, 60, 77):
-        d, err2, _ = curl_json(url, insecure=True)
-        if d is not None:
-            return d, "the IdP's TLS certificate is not trusted by this machine (document read without verification)"
-    return d, err
+    """Fetch JSON with normal TLS verification; identify HTTP documents as unauthenticated."""
+    d, err, _ = curl_json(url)
+    if d is None:
+        return d, err, False
+    authenticated = urllib.parse.urlsplit(url).scheme.lower() == "https"
+    return d, None if authenticated else "HTTP source is not authenticated", authenticated
+
+
+def oauth_marklogic_endpoint_urls(cfg, jwks_uri):
+    """Endpoints MarkLogic contacts for one OAuth profile."""
+    urls = {jwks_uri} if jwks_uri else set()
+    if "authorization" in str(cfg.get("oauth-flow-type") or "").lower() and cfg.get("oauth-token-server-uri"):
+        urls.add(cfg["oauth-token-server-uri"])
+    return urls
 
 
 def der_len(n):
@@ -1629,7 +1705,7 @@ def verify_rs256(jwk, signing_input, sig):
     return r.returncode == 0 and "Verified OK" in r.stdout
 
 
-def analyse_token(path, cfg, jwks, role_map, ext_names):
+def analyse_token(path, cfg, jwks, role_map, ext_names, jwks_authenticated=False):
     say("## Token check")
     say("")
     raw = open(path, encoding="utf-8", errors="replace").read().strip()
@@ -1659,7 +1735,7 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
         if isinstance(claims.get(k), (int, float)):
             say("- %s: %s UTC" % (k, dt.datetime.fromtimestamp(claims[k], dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
     if isinstance(claims.get("exp"), (int, float)):
-        say("  (a captured token is normally expired by now; compare with the time of the failed request, not with the time of this check)")
+        say("  (the claim time is UTC; ErrorLog timestamps are host-local, and a combined validation message does not establish whether expiry or signature validation failed)")
     ci = cfg.get("oauth-jwt-issuer-uri")
     if ci:
         check("PASS" if iss == ci else "FAIL", "token iss = oauth-jwt-issuer-uri", "config `%s` / token `%s`" % (ci, iss))
@@ -1685,16 +1761,19 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
                   "the token has no `%s` claim (or it is empty), so there is nothing to match to a role external name and the login gets no roles (HTTP 403). "
                   "The IdP does not put the claim in this token: check the IdP's scope or property mapping for the application, and that the scope that carries it is requested" % ra)
         elif role_map is not None:
-            hit = {str(v): role_map[str(v)] for v in vals if str(v) in role_map}
+            role_names = {k.casefold(): (k, roles) for k, roles in role_map.items()}
+            hit = {str(v): role_names[str(v).casefold()] for v in vals if str(v).casefold() in role_names}
             if hit:
-                check("PASS", "role claim values map to MarkLogic roles", "; ".join("`%s` -> %s" % (k, ", ".join(v)) for k, v in hit.items()))
+                check("PASS", "role claim values map to MarkLogic roles",
+                      "; ".join("`%s` -> %s (external name `%s`: matches ignoring case)" % (value, ", ".join(roles), external_name)
+                                for value, (external_name, roles) in hit.items()))
             else:
                 other = []
                 for cn, cv in claims.items():
                     if cn == ra:
                         continue
                     cv = cv if isinstance(cv, list) else [cv]
-                    m = [str(v) for v in cv if isinstance(v, (str, int)) and str(v) in role_map]
+                    m = [str(v) for v in cv if isinstance(v, (str, int)) and str(v).casefold() in role_names]
                     if m:
                         other.append("`%s` (%s)" % (cn, ", ".join(m)))
                 near = closest_names([str(v) for v in vals], role_map)
@@ -1706,7 +1785,9 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
         keys = [k for k in jwks.get("keys", []) if k.get("kty") == "RSA"]
         cand = [k for k in keys if k.get("kid") == kid] or ([] if kid else keys)
         if not cand:
-            check("FAIL", "token kid is in the JWKS", "kid `%s`; the JWKS holds: %s" % (kid, ", ".join(str(k.get("kid")) for k in jwks.get("keys", [])) or "no keys"))
+            check("FAIL" if jwks_authenticated else "WARN", "token kid is in the JWKS",
+                  "kid `%s`; the JWKS holds: %s%s" % (kid, ", ".join(str(k.get("kid")) for k in jwks.get("keys", [])) or "no keys",
+                  "" if jwks_authenticated else "; this JWKS source is not authenticated, so the comparison is not conclusive"))
         else:
             try:
                 ok = verify_rs256(cand[0], (h64 + "." + p64).encode(), b64url(s64))
@@ -1714,7 +1795,11 @@ def analyse_token(path, cfg, jwks, role_map, ext_names):
                 ok = None
                 say("Signature check could not run: %s" % e)
             if ok is not None:
-                check("PASS" if ok else "FAIL", "token signature verifies with the JWKS key", "kid `%s`" % cand[0].get("kid"))
+                result = ("PASS" if ok else "FAIL") if jwks_authenticated else "WARN"
+                detail = "kid `%s`" % cand[0].get("kid")
+                if not jwks_authenticated:
+                    detail += "; JWKS source is not authenticated, so this comparison is diagnostic only"
+                check(result, "token signature verifies with the JWKS key", detail)
     elif alg and alg != "RS256":
         missing("Token signature check", "only RS256 is checked (token alg is `%s`)" % alg, "n/a")
     elif not jwks:
@@ -1766,8 +1851,8 @@ def run_oauth(c):
         sp = b["props"]
         if str(first(sp, "authentication")) != "oauth":
             check("WARN", "app server %s uses oauth authentication" % b["name"],
-                  "authentication is `%s`, not `oauth`, although an OAuth profile is attached: the app server asks for a `%s` login and never evaluates a bearer token or starts the authorization flow. "
-                  "Set the app server's authentication to oauth" % (first(sp, "authentication"), first(sp, "authentication")))
+                  "authentication is `%s`, not `oauth`, although an OAuth profile is attached. This setting alone does not establish whether MarkLogic will accept bearer tokens through that profile; verify the request behavior for this flow and version." %
+                  first(sp, "authentication"))
         for pn in [str(x) for x in find_all(sp, "external-security")]:
             pc = cfgs.get(pn) or {}
             if str(pc.get("oauth-redirect-uri") or "").startswith("https://") and not first(sp, "ssl-certificate-template"):
@@ -1780,40 +1865,47 @@ def run_oauth(c):
     ext = describe_users(c, "With authorization `oauth`, the values of the role claim are matched to the external names of roles.")
     # endpoint probes
     jwks_doc = None
+    jwks_authenticated = False
     if profiles and not getattr(a, "no_probe", False):
         say("## IdP endpoints (read from this machine)")
         say("")
         tls_lines_note()
         for n, cfg in cfgs.items():
             iss = cfg.get("oauth-jwt-issuer-uri")
-            disc, note = (None, None)
+            disc, note, disc_authenticated = (None, None, False)
             if iss:
                 url = iss.rstrip("/") + "/.well-known/openid-configuration"
-                disc, note = get_json_probe(url)
+                disc, note, disc_authenticated = get_json_probe(url)
                 c.probed.add(url)
                 if disc is None:
                     say("- Discovery document `%s`: not readable (%s)" % (url, note))
                     check("WARN", "%s: discovery document readable" % n, "%s: %s" % (url, note))
                 else:
                     say("- Discovery document `%s`: read%s" % (url, " (%s)" % note if note else ""))
-                    check("PASS" if disc.get("issuer") == iss else "FAIL", "%s: discovery issuer = oauth-jwt-issuer-uri" % n,
-                          "config `%s` / discovery `%s`" % (iss, disc.get("issuer")))
+                    issuer_matches = disc.get("issuer") == iss
+                    issuer_result = ("PASS" if issuer_matches else "FAIL") if disc_authenticated else "WARN"
+                    check(issuer_result, "%s: discovery issuer = oauth-jwt-issuer-uri" % n,
+                          "config `%s` / discovery `%s`%s" % (iss, disc.get("issuer"),
+                          "" if disc_authenticated else "; discovery document came from an unauthenticated source"))
                     for ck, dk in (("oauth-authorization-server-uri", "authorization_endpoint"), ("oauth-token-server-uri", "token_endpoint"),
                                    ("oauth-jwks-uri", "jwks_uri")):
                         if cfg.get(ck) and disc.get(dk):
-                            check("PASS" if cfg[ck] == disc[dk] else "WARN", "%s: %s = discovery %s" % (n, ck, dk),
-                                  "config `%s` / discovery `%s`" % (cfg[ck], disc[dk]))
+                            result = "PASS" if cfg[ck] == disc[dk] and disc_authenticated else "WARN"
+                            check(result, "%s: %s = discovery %s" % (n, ck, dk),
+                                  "config `%s` / discovery `%s`%s" % (cfg[ck], disc[dk],
+                                  "" if disc_authenticated else "; discovery document came from an unauthenticated source"))
                     algs = disc.get("id_token_signing_alg_values_supported") or []
                     if algs and cfg.get("oauth-jwt-alg") and cfg["oauth-jwt-alg"] not in algs:
                         check("WARN", "%s: oauth-jwt-alg offered by the IdP" % n, "config `%s` / IdP offers %s" % (cfg["oauth-jwt-alg"], ", ".join(algs)))
             ju = cfg.get("oauth-jwks-uri") or (disc or {}).get("jwks_uri")
             if ju:
-                jd, jnote = get_json_probe(ju)
+                jd, jnote, jwks_transport_authenticated = get_json_probe(ju)
                 if jd is None:
                     say("- JWKS `%s`: not readable (%s)" % (ju, jnote))
                     check("FAIL", "%s: JWKS readable" % n, "%s: %s" % (ju, jnote))
                 else:
                     jwks_doc = jd
+                    jwks_authenticated = jwks_transport_authenticated and (bool(cfg.get("oauth-jwks-uri")) or disc_authenticated)
                     say("- JWKS `%s`: %d key(s)%s" % (ju, len(jd.get("keys", [])), " (%s)" % jnote if jnote else ""))
                     for k in jd.get("keys", []):
                         exp = ""
@@ -1824,17 +1916,19 @@ def run_oauth(c):
                                 left = (ci["not_after"] - NOW).days
                                 exp = ", certificate %s" % ("EXPIRED" if left < 0 else "expires in %d days" % left)
                                 if left < 0:
-                                    check("FAIL", "%s: JWKS key %s certificate" % (n, str(k.get("kid"))[:12]), "expired")
+                                    check("FAIL" if jwks_authenticated else "INFO", "%s: JWKS key %s certificate" % (n, str(k.get("kid"))[:12]),
+                                          "expired" if jwks_authenticated else "expired according to an unauthenticated JWKS source")
                         say("  - kid `%s`, kty `%s`, alg `%s`, use `%s`%s" % (k.get("kid"), k.get("kty"), k.get("alg"), k.get("use"), exp))
             else:
                 missing("JWKS check of profile `%s`" % n, "no oauth-jwks-uri and no discovery document", "set oauth-jwks-uri, or allow the discovery document to be read")
+            contacted_urls = oauth_marklogic_endpoint_urls(cfg, ju)
             hosts, contacted = set(), set()
             for u in (iss, cfg.get("oauth-authorization-server-uri"), cfg.get("oauth-token-server-uri"), ju):
                 m = re.match(r"https://([^/:]+)(?::(\d+))?", u or "")
                 if m:
                     hosts.add((m.group(1), m.group(2) or "443"))
                     # MarkLogic itself connects to the JWKS URI (and, in the authorization code flow, the token endpoint); the issuer is only compared as a string and the browser uses the authorization URL
-                    if u in (ju, cfg.get("oauth-token-server-uri") if is_ac else None):
+                    if u in contacted_urls:
                         contacted.add((m.group(1), m.group(2) or "443"))
             for h, port in sorted(hosts):
                 if (h, port) in c.probed:
@@ -1861,7 +1955,7 @@ def run_oauth(c):
             missing("Token comparison", "several OAuth profiles exist and none was chosen", "add --external-security <name> so the token is compared with the right profile")
         else:
             try:
-                analyse_token(a.token, cfg, jwks_doc, role_map, ext)
+                analyse_token(a.token, cfg, jwks_doc, role_map, ext, jwks_authenticated)
             except Exception as e:  # noqa: BLE001
                 say("## Token check\n\nCould not read the token: %s\n" % e)
                 check("FAIL", "token readable", str(e))
@@ -1873,7 +1967,7 @@ def run_oauth(c):
         analyse_logs_generic(c, "oauth", bound)
     elif profiles:
         missing("ErrorLog, AccessLog and trace-event status", "--logs not given",
-                "add --logs --start <UTC time shortly before the test> (switch the trace events on first: ml-trace-events.py enable --preset oauth)")
+                "add --logs --start <UTC time shortly before the test> (switch the trace events on first: ./ml-trace-events.py enable --preset oauth)")
 
 
 # ---------------------------------------------------------------- LDAP
@@ -2056,9 +2150,10 @@ def run_ldap(c):
         elif pr.get("certs"):
             missing("CA certificate of profile `%s`" % n, "no certificate is stored in the profile",
                     "fine if MarkLogic's trusted certificate authorities already contain the directory's CA; otherwise store it in the profile")
-            hit = ml_trust_of_chain(c, pr["certs"])
-            check("PASS" if hit else "WARN", "%s: directory chain is trusted by MarkLogic" % n,
-                  ("found in MarkLogic's certificate authorities: %s" % hit) if hit else "no certificate of the chain is in MarkLogic's trusted certificate authorities")
+            evidence = ml_trust_store_evidence(c, pr["certs"])
+            detail = ("Possible store correspondence: %s. " % evidence) if evidence else "No name/key-identifier correspondence was found. "
+            check("INFO", "%s: MarkLogic trust status not verified" % n,
+                  detail + "The Management API does not provide the trusted CA certificate bytes here, so this check cannot validate the path, signatures, validity, CA constraints, or MarkLogic's actual connection behavior.")
     bound = bound_servers(c, set(profiles)) if profiles else []
     if getattr(a, "appserver", None) and profiles:
         check_named_appserver(c, a.appserver, a.group, set(profiles), "ldap")
@@ -2074,7 +2169,7 @@ def run_ldap(c):
         analyse_logs_generic(c, "ldap", bound)
     elif profiles:
         missing("ErrorLog, AccessLog and trace-event status", "--logs not given",
-                "add --logs --start <UTC time shortly before the test> (switch the trace events on first: ml-trace-events.py enable --preset ldap)")
+                "add --logs --start <UTC time shortly before the test> (switch the trace events on first: ./ml-trace-events.py enable --preset ldap)")
 
 
 # ---------------------------------------------------------------- HTTPS
@@ -2265,7 +2360,7 @@ def load_user_external_names(c):
             for en in ens:
                 umap.setdefault(en, []).append(n)
     with open(os.path.join(c.out, "users-external-names.json"), "w") as f:
-        json.dump(umap, f, indent=2)
+        json.dump(redact(umap), f, indent=2)
     return umap
 
 
@@ -2640,7 +2735,7 @@ def run_certificate(c):
         if role_map is not None:
             for pn, pp in ldap_profiles.items():
                 check_group_dns(pn, first(pp, "ldap-base") or "", role_map, use_base=False)
-        say("With authorization `ldap` switch on the trace events External Authenticate, LDAP and LDAP Search for the log part (`ml-trace-events.py enable --preset ldap`).")
+        say("With authorization `ldap` switch on the trace events External Authenticate, LDAP and LDAP Search for the log part (`./ml-trace-events.py enable --preset ldap`).")
         say("")
     if a.client_cert:
         check_client_cert(c, a, chosen, profs)
@@ -2664,7 +2759,7 @@ def run_certificate(c):
         analyse_logs_generic(c, "certificate", [{"name": nm, "group": grp, "port": first(sp, "port")} for nm, grp, sp in chosen])
     else:
         missing("ErrorLog lines (no user / pass)", "--logs not given",
-                "add --logs --start <UTC time shortly before the test> (switch the trace event on first: ml-trace-events.py enable --preset certificate)")
+                "add --logs --start <UTC time shortly before the test> (switch the trace event on first: ./ml-trace-events.py enable --preset certificate)")
 
 
 # ---------------------------------------------------------------- SAML
@@ -2698,7 +2793,7 @@ def run_saml(c):
         say("### `%s`" % n)
         say("")
         if auth != "saml":
-            say("Authentication type `%s`: this version only has SAML checks. The profile's settings, certificates and app servers are reported; secrets are removed." % auth)
+            say("Authentication type `%s`: this version only has SAML checks. The profile's settings, certificates and app servers are reported; known credential fields are redacted." % auth)
             say("")
             say("| Setting | Value |")
             say("|---|---|")
@@ -2874,12 +2969,14 @@ def run_saml(c):
     if a.idp_metadata:
         say("## IdP metadata check")
         say("")
-        text, err = load_metadata(a.idp_metadata, a)
+        text, err, md_authenticated = load_metadata(a.idp_metadata, a)
         if err:
             say("Could not read the metadata: " + err)
             check("FAIL", "IdP metadata readable", err)
             missing("IdP metadata comparison", "the metadata could not be read (%s)" % err[:100], "check the file name or URL; use --metadata-insecure for an untrusted TLS certificate")
         else:
+            if not md_authenticated:
+                say("Metadata was read from an unauthenticated source; comparisons below are diagnostic only.")
             try:
                 md = parse_metadata(text)
             except ET.ParseError as e:
@@ -2888,7 +2985,7 @@ def run_saml(c):
                 check("FAIL", "IdP metadata is valid XML", str(e))
         if md:
             with open(os.path.join(out, "idp-metadata.xml"), "w") as f:
-                f.write(text)
+                f.write(scrub(text))
             say("- entityID: `%s`" % md["entity_id"])
             for b, loc in md["sso"]:
                 say("- SingleSignOnService %s: `%s`" % (b.rsplit(":", 1)[-1], loc))
@@ -2903,21 +3000,30 @@ def run_saml(c):
                     check("WARN", "metadata validUntil has passed", md["valid_until"])
             for n, cfg in cfgs.items():
                 if cfg.get("saml-entity-id"):
-                    check("PASS" if cfg["saml-entity-id"] == md["entity_id"] else "FAIL", "%s: saml-entity-id = metadata entityID" % n,
-                          "config `%s` / metadata `%s`" % (cfg["saml-entity-id"], md["entity_id"]))
+                    matches = cfg["saml-entity-id"] == md["entity_id"]
+                    result = ("PASS" if matches else "FAIL") if md_authenticated else "WARN"
+                    check(result, "%s: saml-entity-id = metadata entityID" % n,
+                          "config `%s` / metadata `%s`%s" % (cfg["saml-entity-id"], md["entity_id"],
+                          "" if md_authenticated else "; metadata source is not authenticated"))
                 if cfg.get("saml-destination"):
                     locs = [l for _, l in md["sso"]]
-                    check("PASS" if cfg["saml-destination"] in locs else "FAIL", "%s: saml-destination is a metadata SSO URL" % n,
-                          "config `%s` / metadata %s" % (cfg["saml-destination"], ", ".join(locs) or "none"))
+                    matches = cfg["saml-destination"] in locs
+                    result = ("PASS" if matches else "FAIL") if md_authenticated else "WARN"
+                    check(result, "%s: saml-destination is a metadata SSO URL" % n,
+                          "config `%s` / metadata %s%s" % (cfg["saml-destination"], ", ".join(locs) or "none",
+                          "" if md_authenticated else "; metadata source is not authenticated"))
                 mdfp = {i["sha1"] for i in mdinfo}
                 if cfg["_cert_sha1"] and mdfp:
                     hit = set(cfg["_cert_sha1"]) & mdfp
-                    check("PASS" if hit else "FAIL", "%s: stored IdP certificate is in the metadata" % n,
-                          "stored %s / metadata %s" % (", ".join(cfg["_cert_sha1"]), ", ".join(sorted(mdfp))))
+                    result = ("PASS" if hit else "FAIL") if md_authenticated else "WARN"
+                    check(result, "%s: stored IdP certificate is in the metadata" % n,
+                          "stored %s / metadata %s%s" % (", ".join(cfg["_cert_sha1"]), ", ".join(sorted(mdfp)),
+                          "" if md_authenticated else "; metadata source is not authenticated"))
                     extra = mdfp - set(cfg["_cert_sha1"])
                     if hit and extra:
                         check("INFO", "%s: metadata lists other signing certificates" % n,
-                              "%d not stored in MarkLogic (a rollover certificate?). Tokens signed by them would be rejected" % len(extra))
+                              "%d not stored in MarkLogic%s" % (len(extra),
+                              "" if md_authenticated else " according to an unauthenticated metadata source"))
         say("")
 
     has_saml = any(c.get("authentication") == "saml" for c in cfgs.values())
@@ -2949,7 +3055,7 @@ def run_saml(c):
 
     if not a.logs:
         missing("ErrorLog, AccessLog and trace-event status", "--logs not given",
-                "add --logs --start <UTC time shortly before the test> (switch the trace events on first with ml-trace-events.py, preset saml or oauth)")
+                "add --logs --start <UTC time shortly before the test> (switch the trace events on first with ./ml-trace-events.py, preset saml or oauth)")
     # 7. trace events, role map and logs
     if a.logs or cfgs:
         role_map = load_role_map(api, out, errors)
@@ -3048,6 +3154,9 @@ def conclusion_lines(checks, not_collected, errors):
 
 def finish(c):
     out, errors = c.out, c.errors
+    CHECKS[:] = [(result, scrub(name), scrub(detail)) for result, name, detail in CHECKS]
+    NOT_COLLECTED[:] = [(scrub(what), scrub(why), scrub(how)) for what, why, how in NOT_COLLECTED]
+    errors[:] = [scrub(error) for error in errors]
     # summary
     say("## Not collected")
     say("")
@@ -3080,12 +3189,12 @@ def finish(c):
         for e in errors:
             say("- " + e)
         say("")
-    say("Only the properties named above were read. The SP private key, passwords and secrets are removed before saving.")
+    say("Only the properties named above were read. Known credential fields and token forms are redacted; review every file in the archive before sharing it.")
     with open(os.path.join(out, "SUMMARY.md"), "w") as f:
         f.write("\n".join(REPORT) + "\n")
     shutil.make_archive(out, "zip", out)
     fails = sum(1 for c in CHECKS if c[0] == "FAIL")
-    print("Wrote %s/SUMMARY.md and %s.zip  (%d FAIL, %d WARN)" % (out, out, fails, sum(1 for c in CHECKS if c[0] == "WARN")))
+    print(scrub("Wrote %s/SUMMARY.md and %s.zip  (%d FAIL, %d WARN)" % (out, out, fails, sum(1 for c in CHECKS if c[0] == "WARN"))))
 
 
 # ---------------------------------------------------------------- command line
@@ -3133,22 +3242,23 @@ def build_parser():
 a captured SAML response and the SAML trace in the logs. Only --host and --user are required.
 
 Smallest useful run:
-  ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile>
+  ./ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile>
 Fuller run (login problem):
-  ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \\
+  ./ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \\
       --user-name <failing MarkLogic user> --idp-metadata <file or https://...> \\
       --saml-response response.txt --logs --start 2026-01-15T09:00:00Z""", [base, prof, logs])
     s.add_argument("--idp-metadata", help="IdP metadata file or URL")
     s.add_argument("--saml-response", help="file holding a captured SAMLResponse (XML, base64, or an authorization header line)")
     s.add_argument("--metadata-insecure", action="store_true", help="do not verify the TLS certificate of a metadata URL")
 
-    s = add("oauth", "OAuth external security profile (MarkLogic 11: Resource server; MarkLogic 12 also Authorization code)", """OAuth: read the profile, the app servers using it, the IdP discovery document and JWKS, the IdP's TLS chain (and whether
-MarkLogic trusts it), a captured access token and the OAuth trace in the logs. Only --host and --user are required.
+    s = add("oauth", "OAuth external security profile (MarkLogic 11: Resource server; MarkLogic 12 also Authorization code)", """OAuth: read the profile, the app servers using it, the IdP discovery document and JWKS, the IdP's TLS chain and
+limited trust-store evidence (not a verification of MarkLogic's chain handling), a captured access token and the OAuth trace.
+Only --host and --user are required.
 
 Smallest useful run:
-  ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile>
+  ./ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile>
 Fuller run (token rejected):
-  ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> \\
+  ./ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> \\
       --token token.txt --logs --start 2026-01-15T09:00:00Z""", [base, prof, logs, probe])
     s.add_argument("--token", metavar="FILE", help="file holding a captured access token (JWT) or an Authorization: Bearer header line")
 
@@ -3156,9 +3266,9 @@ Fuller run (token rejected):
 trusted CAs, the user/role external names and the LDAP trace in the logs. Only --host and --user are required.
 
 Smallest useful run:
-  ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile>
+  ./ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile>
 Fuller run (login problem):
-  ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile> \\
+  ./ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile> \\
       --user-name <MarkLogic user> --logs --start 2026-01-15T09:00:00Z""", [base, prof, logs, probe])
     s.add_argument("--appserver", metavar="NAME", help="also check that this app server uses the profile (names an app server with no external security profile attached)")
     s.add_argument("--group", help="group of that app server (default: any)")
@@ -3168,9 +3278,9 @@ chain, host name match, expiry, protocol versions and cipher. Without --appserve
 template is checked. Only --host and --user are required.
 
 Smallest useful run:
-  ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server name>
+  ./ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server name>
 Private CA (check the served chain against it):
-  ml-security-gather.py https --host ml1.example.com --user admin --appserver <name> --server-ca my-ca.pem""", [base, logs, probe])
+  ./ml-security-gather.py https --host ml1.example.com --user admin --appserver <name> --server-ca my-ca.pem""", [base, logs, probe])
     s.add_argument("--appserver", metavar="NAME", help="check this app server (default: every app server with a certificate template)")
     s.add_argument("--group", help="group of the app server (default: any)")
     s.add_argument("--server-ca", metavar="CA.PEM", help="CA bundle for verifying the certificate the app server presents")
@@ -3183,9 +3293,9 @@ subject DN maps to. A client certificate that fails in the TLS handshake leaves 
 are required.
 
 Smallest useful run:
-  ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <app server name>
+  ./ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <app server name>
 Fuller run (a certificate is refused):
-  ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <name> --client-cert client.pem \\
+  ./ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <name> --client-cert client.pem \\
       --client-chain ca-chain.pem --logs --start 2026-01-15T09:00:00Z""", [base, logs, probe])
     s.add_argument("--appserver", metavar="NAME", help="check this app server (default: every app server with authentication certificate)")
     s.add_argument("--group", help="group of the app server (default: any)")

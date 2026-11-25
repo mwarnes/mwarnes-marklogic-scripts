@@ -11,8 +11,11 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "ml-security-gather.py"
 PORT = 18095
@@ -65,7 +68,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({"port": 9100, "authentication": STATE.get("api_auth", "oauth"), "external-security": STATE.get("api_ext", ["oa", "ld"]),
                                **({"ssl-certificate-template": "T"} if STATE.get("api_tpl") else {})})
         if p == "/manage/v2/roles":
+            if STATE.get("role_count"):
+                return self.reply({"x": {"list-items": {"list-item": [
+                    {"nameref": "role-%d" % i} for i in range(STATE["role_count"])
+                ]}}})
             return self.reply({"x": {"list-items": {"list-item": [{"nameref": "reader"}]}}})
+        if p == "/manage/v2/roles/reader/properties" and STATE.get("role_error"):
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"access_token": "ROLE-OPAQUE-TOKEN",
+                                         "client_secret": "ROLE-CLIENT-SECRET"}).encode())
+            return
         if p == "/manage/v2/roles/reader/properties":
             return self.reply({"role-name": "reader", "external-name": ["ml-readers"] + STATE.get("role_dns", [])})
         if p == "/manage/v2/groups/Default/properties":
@@ -98,7 +112,8 @@ class GatherTests(unittest.TestCase):
 
     def setUp(self):
         STATE.update(version="12.1.0", flow="Resource server")
-        for k in ("authz", "redirect_uri", "api_auth", "api_tpl", "api_ext", "ldap_uri", "ldap_authz"):
+        for k in ("authz", "redirect_uri", "api_auth", "api_tpl", "api_ext", "ldap_uri", "ldap_authz",
+                  "role_error", "role_count"):
             STATE.pop(k, None)
 
     def jwt(self, claims, kid="k1", tamper=False):
@@ -154,6 +169,19 @@ class GatherTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("MARKLOGIC_PASS", r.stderr)
 
+    def test_existing_nonempty_output_directory_is_not_archived(self):
+        out = Path(self.tmp, "preexisting-output")
+        out.mkdir()
+        sentinel = out / "keep.txt"
+        sentinel.write_text("DO-NOT-ARCHIVE")
+        r = subprocess.run([sys.executable, "-I", str(SCRIPT), "saml", "--host", "127.0.0.1", "--port", str(PORT),
+                           "--scheme", "http", "--user", "admin", "--out", str(out)],
+                          env=dict(os.environ, MARKLOGIC_PASS="x"), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("output path already exists and is not empty", r.stderr)
+        self.assertEqual(sentinel.read_text(), "DO-NOT-ARCHIVE")
+        self.assertFalse(Path(str(out) + ".zip").exists())
+
     def test_unknown_profile_lists_the_existing_ones(self):
         r, s, out = self.run_gather("oauth", "--external-security", "nope")
         self.assertNotEqual(r.returncode, 0)
@@ -170,16 +198,125 @@ class GatherTests(unittest.TestCase):
         s = self.token_summary("t1", self.jwt(self.token_rows()))
         self.assertNotIn("| **FAIL** |", s)
         self.assertIn("token signature verifies", s)
+        self.assertIn("JWKS source is not authenticated", s)
 
     def test_tampered_token_fails_the_signature_check(self):
         s = self.token_summary("t2", self.jwt(self.token_rows(), tamper=True))
-        self.assertIn("| **FAIL** | token signature verifies", s)
+        self.assertIn("| **WARN** | token signature verifies", s)
 
     def test_wrong_issuer_and_unknown_kid_and_unmapped_role(self):
         c = self.token_rows()
         self.assertIn("| **FAIL** | token iss = oauth-jwt-issuer-uri", self.token_summary("t3", self.jwt(dict(c, iss="http://x/"))))
-        self.assertIn("| **FAIL** | token kid is in the JWKS", self.token_summary("t4", self.jwt(c, kid="rotated")))
+        self.assertIn("| **WARN** | token kid is in the JWKS", self.token_summary("t4", self.jwt(c, kid="rotated")))
         self.assertIn("| **FAIL** | role claim values map to a MarkLogic role", self.token_summary("t5", self.jwt(dict(c, groups=["nobody"]))))
+
+    def test_token_role_claim_matching_ignores_case_like_trace_matching(self):
+        s = self.token_summary("tok-case", self.jwt(dict(self.token_rows(), groups=["ML-READERS"])))
+        self.assertIn("`ML-READERS` -> reader (external name `ml-readers`: matches ignoring case)", s)
+
+    def test_scrub_removes_opaque_tokens_json_multiline_and_encoded_credentials(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = "\n".join((
+            "access_token=OPAQUE-ACCESS-TOKEN",
+            '{"client_secret":\n "JSON-CLIENT-SECRET"}',
+            "%22client_secret%22%3A%22ENCODED-CLIENT-SECRET%22",
+            "Authorization: Bearer OPAQUE-BEARER-TOKEN",
+            "Authorization: Basic BASIC-AUTH-SECRET",
+            "Set-Cookie: session=COOKIE-SECRET",
+            '<input type="hidden" name="access_token" value="HTML-OPAQUE-TOKEN">',
+            "<saml:Response><saml:Assertion>XML-ASSERTION-CONTENT</saml:Assertion></saml:Response>",
+        ))
+        scrubbed = mod.scrub(text)
+        for secret in ("OPAQUE-ACCESS-TOKEN", "JSON-CLIENT-SECRET", "ENCODED-CLIENT-SECRET", "OPAQUE-BEARER-TOKEN",
+                       "BASIC-AUTH-SECRET", "COOKIE-SECRET", "HTML-OPAQUE-TOKEN", "XML-ASSERTION-CONTENT"):
+            self.assertNotIn(secret, scrubbed)
+
+    def test_insecure_metadata_download_is_marked_unauthenticated(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        response = SimpleNamespace(returncode=0, stdout="<metadata/>", stderr="")
+        with mock.patch.object(mod.subprocess, "run", return_value=response):
+            _, error, authenticated = mod.load_metadata("https://idp.example.com/metadata",
+                                                        SimpleNamespace(metadata_insecure=True))
+        self.assertIsNone(error)
+        self.assertFalse(authenticated)
+
+    def test_secrets_are_redacted_from_reports_logs_and_archives_when_role_reads_fail(self):
+        STATE["role_error"] = True
+        STATE["errlog_extra"] = (
+            '2026-10-25 10:00:08.000 Info: [Event:id=OAuth Communications] Response: '
+            '{"access_token": "LOG-OPAQUE-TOKEN", "client_secret": "LOG-CLIENT-SECRET"}\n'
+        )
+        token = Path(self.tmp, "role-error-token")
+        token.write_text(self.jwt(self.token_rows()))
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--token", str(token), *self.OWIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("role properties could not be read; mapping is incomplete", s)
+        self.assertNotIn("| **FAIL** | role claim values map to a MarkLogic role", s)
+        paths = list(Path(out).iterdir())
+        texts = [path.read_text() for path in paths]
+        with zipfile.ZipFile(out + ".zip") as archive:
+            texts.extend(archive.read(name).decode("utf-8") for name in archive.namelist())
+        for secret in ("ROLE-OPAQUE-TOKEN", "ROLE-CLIENT-SECRET", "LOG-OPAQUE-TOKEN", "LOG-CLIENT-SECRET"):
+            self.assertTrue(all(secret not in text for text in texts), secret)
+
+    def test_role_map_cap_marks_mapping_not_collected(self):
+        STATE["role_count"] = 1501
+        token = Path(self.tmp, "role-cap-token")
+        token.write_text(self.jwt(self.token_rows()))
+        r, s, out = self.run_gather("oauth", "--external-security", "oa", "--token", str(token), "--no-probe")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("more than 1500 roles; mapping was not checked", s)
+        self.assertNotIn("| **FAIL** | role claim values map to a MarkLogic role", s)
+        self.assertFalse(Path(out, "roles-external-names.json").exists())
+
+    def test_http_jwks_is_not_used_as_authenticated_signature_evidence(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with mock.patch.object(mod, "curl_json", return_value=(None, "certificate verify failed", 60)) as fetch:
+            data, note, authenticated = mod.get_json_probe("https://idp.example.com/jwks")
+        self.assertIsNone(data)
+        self.assertFalse(authenticated)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_oauth_endpoint_classification_is_profile_specific(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        jwks = "https://keys.example.com/jwks"
+        token = "https://issuer.example.com/token"
+        resource_server = {"oauth-flow-type": "Resource server", "oauth-token-server-uri": token}
+        authorization_code = {"oauth-flow-type": "Authorization code", "oauth-token-server-uri": token}
+        self.assertEqual(mod.oauth_marklogic_endpoint_urls(resource_server, jwks), {jwks})
+        self.assertEqual(mod.oauth_marklogic_endpoint_urls(authorization_code, jwks), {jwks, token})
+
+    def test_same_common_name_with_different_key_ids_does_not_claim_marklogic_trust(self):
+        import importlib.util
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("gather", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        info = {"subject": "CN=shared-ca.example.com", "issuer": "CN=shared-ca.example.com",
+                "ski": "AA:01", "aki": "AA:01"}
+        c = SimpleNamespace(_trusted=[("shared-ca.example.com", "AA:02", "")])
+        mod.CHECKS.clear()
+        mod.REPORT.clear()
+        with mock.patch.object(mod, "cert_info", return_value=info), \
+                mock.patch.object(mod, "analyse_chain", return_value=[info]), \
+                mock.patch.object(mod, "host_matches", return_value=True):
+            mod.analyse_tls_chain(c, "IdP endpoint", {"certs": [b"synthetic"], "verify_code": 0, "verify_msg": "ok"},
+                                  "idp.example.com", check_ml_trust=True)
+        self.assertTrue(any(result == "INFO" and "MarkLogic trust status not verified" in name and
+                            "different subject key identifiers" in detail for result, name, detail in mod.CHECKS))
+        self.assertFalse(any(result == "PASS" and "trusted by MarkLogic" in name for result, name, _ in mod.CHECKS))
 
     def test_authorization_code_flow_is_refused_on_marklogic_11(self):
         STATE.update(version="11.3.7", flow="Authorization code")
@@ -280,7 +417,8 @@ class GatherTests(unittest.TestCase):
         good = {"iss": ISS, "aud": "client", "exp": int(time.time()) + 600, "preferred_username": "alice", "groups": ["ml-readers"]}
         s = self.token_summary("tok-good", self.jwt(good))
         self.assertIn("## Conclusion", s)
-        self.assertIn("**All good: no failure and no warning in what was collected.**", s)
+        self.assertIn("**No failure found.", s)
+        self.assertIn("discovery document came from an unauthenticated source", s)
         self.assertLess(s.index("## Conclusion"), s.index("## Check results"))
         s = self.token_summary("tok-bad", self.jwt(dict(good, iss="http://elsewhere/")))
         self.assertIn("**Root cause to look at first: token iss = oauth-jwt-issuer-uri**", s)
@@ -451,7 +589,7 @@ class GatherTests(unittest.TestCase):
             STATE.pop("errlog_extra", None)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("is not the client id in the token", s)
-        self.assertIn("one message. If the signature check of `--token` passes, the usual cause is an expired token", s)
+        self.assertIn("Compare `exp` with the request time only when the host time zone and applicable clock tolerance are known", s)
         self.assertIn("did not return a key set", s)
 
     OWIN = ["--logs", "--start", "2026-10-25T09:00:00Z", "--end", "2026-10-25T11:00:00Z", "--no-probe"]
@@ -493,7 +631,8 @@ class GatherTests(unittest.TestCase):
         f = Path(self.tmp, "tok-expired")
         f.write_text(self.jwt({"iss": ISS, "aud": "client", "exp": exp, "preferred_username": "alice", "groups": ["ml-readers"]}))
         s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Status] JWT verification failed. Please check the JWT signature, token format and token expiration.\n", "--token", str(f))
-        self.assertRegex(s, r"\*\*FAIL\*\* \| the token was expired when it was used")
+        self.assertRegex(s, r"\*\*INFO\*\* \| token expiry was not attributed to the log failure")
+        self.assertNotIn("the token was expired when it was used", s)
 
     def test_an_html_page_instead_of_the_jwks_is_named(self):
         s = self.oauth_logs("2026-10-25 10:00:08.000 Info: [Event:id=OAuth Communications] JWKS Response:      <!DOCTYPE html> <html lang=\"en\"> <head>\n")

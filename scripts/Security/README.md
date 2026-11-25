@@ -6,34 +6,37 @@ This folder holds two read-only support tools, written for MarkLogic 11 and 12:
   and opens its report with a one-sentence conclusion.
 - `ml-trace-events.py`: switches the trace events that the diagnosis needs on before a test and off afterwards.
 
-Requirements: `python3` (standard library only), `curl` and `openssl`. Run both scripts from this folder. Host names below
-are examples (`ml1.example.com`). Tests: `python3 -m unittest discover -s scripts/Security/tests`.
+Requirements: `python3` (standard library only), `curl` and `openssl`. Run both scripts from this folder, using `./` because
+the folder is not normally on `PATH`. Host names below are examples (`ml1.example.com`). Run tests from the repository root:
+`python3 -m unittest discover -s scripts/Security/tests` (112 unit tests; mock API, IdP and synthetic data).
 
 ## Quick start
 
 ```
+cd scripts/Security
 export MARKLOGIC_PASS='...'                       # never on the command line
-ml-trace-events.py enable --host ml1.example.com --user admin --preset saml      # 1. trace on
+./ml-trace-events.py enable --host ml1.example.com --user admin --preset saml      # 1. trace on
 #   2. reproduce the failing login (note the time)
-ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \
+./ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \
     --user-name <user> --logs --minutes 15                                       # 3. gather
-ml-trace-events.py disable --host ml1.example.com --user admin --preset saml     # 4. trace off
+./ml-trace-events.py disable --host ml1.example.com --user admin --preset saml     # 4. trace off
 ```
 
-Open `SUMMARY.md` in the output folder first (its first lines are the conclusion), review it, then send the `.zip`.
+Open `SUMMARY.md` first, then inspect every file in the `.zip` before sharing it. The summary contains host names, entity IDs,
+certificate details and user names; it is not a substitute for reviewing the full archive.
 
 ## Areas
 
 ```
-ml-security-gather.py AREA [options]       AREA = saml | oauth | ldap | https | certificate
-ml-security-gather.py AREA --help          the options and examples of one area
+./ml-security-gather.py AREA [options]     AREA = saml | oauth | ldap | https | certificate
+./ml-security-gather.py AREA --help        the options and examples of one area
 ```
 
 | Area | Reads | Optional extras |
 |---|---|---|
 | `saml` | SAML profile, stored IdP/SP certificates, bound app servers, user/role external names | `--idp-metadata`, `--saml-response`, `--user-name`, `--logs` |
-| `oauth` | OAuth profile (Resource server; Authorization code on MarkLogic 12), IdP discovery document, JWKS, IdP TLS chain and whether MarkLogic trusts it | `--token` (signature, issuer, expiry, claims, role mapping), `--user-name`, `--logs`, `--no-probe` |
-| `ldap` | LDAP profile, its certificates, the directory server's TLS (LDAPS or StartTLS) and whether MarkLogic trusts it, the bound app server | `--appserver`, `--user-name`, `--logs`, `--no-probe` |
+| `oauth` | OAuth profile (Resource server; Authorization code on MarkLogic 12), IdP discovery document, JWKS, IdP TLS chain, limited trust-store evidence | `--token` (signature, issuer, expiry, claims, role mapping), `--user-name`, `--logs`, `--no-probe` |
+| `ldap` | LDAP profile, its certificates, the directory server's TLS (LDAPS or StartTLS), limited trust-store evidence, the bound app server | `--appserver`, `--user-name`, `--logs`, `--no-probe` |
 | `https` | App server TLS settings (MarkLogic 11 and 12 spell them differently), certificate template, TEMPORARY versus PERMANENT certificate, the chain the port really serves, host name, protocols | `--appserver`, `--server-ca`, `--probe-host`, `--logs`, `--no-probe` |
 | `certificate` | App servers with authentication `certificate`: selected client CAs, issuer verification, external security profile (authorization `internal` or `ldap`), what the port asks for, the server certificate chain | `--appserver`, `--client-cert`, `--client-chain`, `--logs`, `--no-probe` |
 
@@ -74,9 +77,9 @@ user with the admin role). Anything left out is skipped and listed in the **Not 
 | `--group NAME` | ldap, https, certificate | group of that app server (default any) |
 | `--no-probe` | oauth, ldap, https, certificate | do not connect from this machine to other servers (IdP, directory, app server port) |
 | `--idp-metadata FILE\|URL` | saml | IdP metadata: compared with the stored IdP certificate and entity id |
-| `--metadata-insecure` | saml | do not verify the TLS certificate of a metadata URL |
+| `--metadata-insecure` | saml | do not verify the TLS certificate of a metadata URL; treat results from that source as unverified |
 | `--saml-response FILE` | saml | a captured SAMLResponse (XML, base64 or an authorization header line) |
-| `--token FILE` | oauth | a captured access token (JWT) or an `Authorization: Bearer` line: signature against the JWKS, issuer, client id, expiry, claims, role mapping |
+| `--token FILE` | oauth | a captured access token (JWT) or an `Authorization: Bearer` line: issuer, client id, claims and role mapping; displays `exp`/`iat`/`nbf` and compares RS256 signatures against an authenticated JWKS when available |
 | `--server-ca CA.PEM` | https, certificate | CA bundle for verifying the certificate the app server presents |
 | `--probe-host HOST` | https, certificate | host name to connect to for the live TLS check (default `--host`) |
 | `--client-cert CERT.PEM` | certificate | a PUBLIC client certificate (a file containing a private key is refused): validity, key usage, issuer selected, DN to user mapping |
@@ -85,28 +88,32 @@ user with the admin role). Anything left out is skipped and listed in the **Not 
 Examples (one per area):
 
 ```
-ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \
+./ml-security-gather.py saml --host ml1.example.com --user admin --external-security <profile> \
     --user-name <user> --idp-metadata https://idp.example.com/metadata --saml-response response.txt --logs
-ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> --token token.txt --logs
-ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile> \
+./ml-security-gather.py oauth --host ml1.example.com --user admin --external-security <profile> --token token.txt --logs
+./ml-security-gather.py ldap --host ml1.example.com --user admin --external-security <profile> \
     --appserver <app server> --user-name <user> --logs
-ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server> --server-ca my-ca.pem
-ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <app server> \
+./ml-security-gather.py https --host ml1.example.com --user admin --appserver <app server> --server-ca my-ca.pem
+./ml-security-gather.py certificate --host ml1.example.com --user admin --appserver <app server> \
     --client-cert client.pem --client-chain ca-chain.pem --logs
 ```
 
-## Passwords and secrets
+## Passwords and redaction
 
 The MarkLogic password is read from `MARKLOGIC_PASS` (or asked for when a terminal is attached) and is never accepted on the command line.
-Passwords, private keys, client secrets, whole JWTs and token-endpoint responses are removed before anything is written. The script never
-prints the LDAP search account's password and never queries the directory (it prints the `ldapsearch` and `ldapwhoami` commands to run).
-Review `SUMMARY.md` before sending anything: it contains host names, entity IDs, certificate details and user names. Nothing is changed on the server.
+Known credential fields, private keys, bearer tokens, JWTs, token-endpoint values and common encoded forms are redacted from generated
+reports, logs and JSON. This is best-effort redaction, not a guarantee or a substitute for review: inspect **every file** in the output
+directory and archive, remove any remaining sensitive content, and do not send the archive if you cannot verify it is safe. The script
+never prints the LDAP search account's password and never queries the directory (it prints the `ldapsearch` and `ldapwhoami` commands
+to run). Nothing is changed on the server.
 
 ## Output files
 
-`./<area>-gather-<timestamp>/` holds `SUMMARY.md` (the report), the raw JSON of each Management API call (`cluster.json`, `hosts-status.json`,
+`./<area>-gather-<timestamp>/` holds `SUMMARY.md` (the report), redacted JSON of each Management API call (`cluster.json`, `hosts-status.json`,
 `external-security-*.json`, `servers-list.json`, `server-*.json`, `certificate-template-*.json`, `users-external-names.json`,
-`roles-external-names.json`, ...), with `--logs` the filtered `ErrorLog-*.txt` and `AccessLog-*.txt` for the window, and a `.zip` of the folder.
+`roles-external-names.json`, ...), and, with `--logs`, filtered `ErrorLog-*.txt` and `AccessLog-*.txt` files. The archive is
+`<area>-gather-<timestamp>.zip`, created **beside** the output directory. `--out` must name a new or empty directory; a nonempty
+directory is refused so unrelated files are not included in the archive.
 
 ## Reading the report
 
@@ -122,7 +129,7 @@ Review `SUMMARY.md` before sending anything: it contains host names, entity IDs,
 ## Trace events (`ml-trace-events.py`)
 
 ```
-ml-trace-events.py enable|disable|status --host ml1.example.com --user admin [--preset NAME | --event "Trace event" ...]
+./ml-trace-events.py enable|disable|status --host ml1.example.com --user admin [--preset NAME | --event "Trace event" ...]
 ```
 
 | Option | Default | Meaning |
@@ -151,7 +158,11 @@ testing: results are cached per profile, so a change at the IdP or the directory
 - A client certificate rejected in the TLS handshake (no certificate, expired, wrong CA, wrong key usage) leaves nothing in MarkLogic's logs; the report explains the TLS alerts and the client-side command that shows them.
 - MarkLogic returns the SAML SP private key encrypted, so the report cannot prove it belongs to the certificate: it prints the certificate's public-key SHA-256 and the openssl command that gives the same value for the key file.
 - A refused LDAP bind (error 49) is logged the same way whether the search account or the user was refused; only the directory's access log tells the causes of `unknown user` apart.
-- With an OAuth token the checks are static: a token is not requested and nothing is exchanged with the IdP beyond reading discovery and the JWKS.
+- OAuth checks are static: no token is requested and nothing is exchanged with the IdP beyond reading discovery and the JWKS. Discovery/JWKS documents are fetched without disabling TLS verification; an HTTP source is unauthenticated and produces warnings rather than independently authenticated validation.
+- The RS256 signature comparison is only a comparison with the fetched JWKS key. MarkLogic's trust-store comparison is limited to names/key identifiers: the Management API does not provide the CA certificate bytes needed to validate a path, signatures, validity, CA constraints or MarkLogic's actual connection behavior.
+- Role external-name mapping is not concluded if any role property cannot be read or the cluster has more than 1500 roles; the report marks that check as **Not collected**.
+- A token's `exp` is shown as UTC, but the script does not attribute a log failure to expiry: ErrorLog times are host-local, combined validation messages do not prove the signature passed, and clock tolerance may apply.
+- An app server's non-`oauth` authentication setting does not by itself establish whether an attached OAuth profile accepts bearer tokens; verify behavior for the flow and MarkLogic version.
 - MarkLogic 11.3 cannot reach an IdP endpoint that needs TLS 1.3 or the extended master secret (`SVC-SOCCONN`), and does not serve TLS 1.3 itself.
 - The script reads configuration and logs; it does not log in and it does not read the directory, so group membership and the IdP's own configuration are outside what it can judge.
 
@@ -167,7 +178,7 @@ selected) leaves **nothing** in the ErrorLog or AccessLog, so the cause comes fr
 - with `ssl-client-issuer-authority-verification` false every CA up to the root must be selected, with true the issuing CA alone is enough;
 - validity and clientAuth usage are checked either way (TLS alerts 45, 42 and 43).
 Only a certificate that passes TLS but maps to no user (`certificateAuthenticate() fail because no user`) and a successful login are logged (trace event External Authenticate:
-`ml-trace-events.py enable --preset certificate`). The report lists the TLS alerts and the client-side command that shows them.
+`./ml-trace-events.py enable --preset certificate`). The report lists the TLS alerts and the client-side command that shows them.
 
 **Authorization `ldap`.** When the external security profile has authorization `ldap`, MarkLogic does not look for a user whose external name equals the DN: it binds as the
 search account and does a **base-scope search whose base is the certificate's subject DN as stored** (the directory's own DN order: most specific first), reads the attribute named in
@@ -193,7 +204,7 @@ certificate by its full subject and says what each group is: host certificates h
 EC), the same key in a self-signed root and its cross-signed copy, old certificates without a key identifier, or **different
 keys under one subject** (a warning). It also shows that the names in the certificate-authority list are the **issuer's**
 name, not the certificate's own, so an imported intermediate appears under its root's name and the list looks full of
-duplicates. What triggers the log line was not found (not reproducible with API reads or TLS handshakes).
+duplicates. Shared names or key identifiers are evidence only, not a proof of certificate equality or trust. What triggers the log line was not found (not reproducible with API reads or TLS handshakes).
 
 ## Let's Encrypt import (checked 2026-10-25, MarkLogic 12.1.0)
 
